@@ -86,7 +86,11 @@ def vandermonde(params, order):
     s = monomialStructure(dim, order)
     if len(params[0]) == 1:
         V = np.zeros((len(params), tools.numCoeffsPoly(dim, order)), dtype=np.float64)
-        for a, p in enumerate(params): V[a]=recurrence1D(p, s)
+        # Fix for 1D case
+        if dim == 1:
+            for a, p in enumerate(params): V[a]=recurrence1D(p, s).reshape(-1)
+        else:
+            for a, p in enumerate(params): V[a]=recurrence1D(p, s)
         return V
     else:
         V = np.ones((tools.numCoeffsPoly(dim, order), *params.shape), dtype=np.float64)

@@ -181,7 +181,11 @@ class AppSet(object):
     def vals(self, x, sel=slice(None, None, None), set_cache=True, maxorder=None):
         if set_cache: self.setRecurrence(x)
         if maxorder is None:
-            MM=self._maxrec * self._PC[sel]
+            # Fix for 1D case
+            if self.dim == 1:
+                MM=np.dot(self._PC[sel], self._maxrec)
+            else:
+                MM=self._maxrec * self._PC[sel]
         else:
             nc = apprentice.tools.numCoeffsPoly(self.dim, 2)
             MM=self._maxrec[:nc] * self._PC[sel][:,:nc]
