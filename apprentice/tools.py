@@ -441,6 +441,11 @@ def prediction2YODA(fvals, Peval, fout="predictions.yoda", ferrs=None, wfile=Non
         xmin = np.array(rd["__xmin"])
         xmax = np.array(rd["__xmax"])
 
+    # Fix for the wrong Histogram range 
+    Y = np.concatenate([Y[np.where(hids == name)] for name in observables])
+    dY = np.concatenate([dY[np.where(hids == name)] for name in observables])
+    hids=np.array(sorted([b.split("#")[0] for b in vals._binids]))
+
     DX = (xmax-xmin)*0.5
     X  = xmin + DX
     Y2D = []
@@ -467,6 +472,12 @@ def envelope2YODA(fvals, fout_up="envelope_up.yoda", fout_dn="envelope_dn.yoda",
         rd = json.load(f)
         xmin = np.array(rd["__xmin"])
         xmax = np.array(rd["__xmax"])
+
+    # Fix for the wrong Histogram range 
+    Yup = np.concatenate([Yup[np.where(hids == name)] for name in observables])
+    Ydn = np.concatenate([Ydn[np.where(hids == name)] for name in observables])
+    dY = np.concatenate([dY[np.where(hids == name)] for name in observables])
+    hids=np.array(sorted([b.split("#")[0] for b in vals._binids]))
 
     DX = (xmax-xmin)*0.5
     X  = xmin + DX
