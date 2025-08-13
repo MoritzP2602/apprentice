@@ -715,12 +715,13 @@ class TuningObjective2(object):
 
     def minimizeTNC(self, x0, sel=slice(None, None, None), tol=1e-6):
         from scipy import optimize
+        # Fixed options: maxiter -> maxfun, accuracy -> gtol
         res = optimize.minimize(
                 lambda x: self.objective(x, sel=sel),
                 x0,
                 bounds=self._bounds[self._freeIdx],
                 jac=lambda x:self.gradient(x, sel=sel),
-                method="TNC", tol=tol, options={'maxiter':1000, 'accuracy':tol})
+                method="TNC", tol=tol, options={'maxfun':1000, 'gtol':tol})
         return res
 
     def minimizeLBFGSB(self, x0, sel=slice(None, None, None), tol=1e-6):
