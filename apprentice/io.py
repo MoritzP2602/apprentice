@@ -201,21 +201,23 @@ def read_histos(path):
         return read_yoda_pre180(path)
 
     histos = {}
-    s2s, types = [], []
-    aos = yoda.read(path, asdict=False)
+    aos = yoda.read(path)
+    # Fixed to handle YODA 2.x (dict) and 1.x (list)
+    if isinstance(aos, dict):
+        items = aos.items()
+    else:
+        items = [(ao.path(), ao) for ao in aos]
+
     try:
-        for ao in aos:
+        for path, ao in items:
             import os
-            if os.path.basename(ao.path()).startswith("_"): continue
-            if "/RAW/" in ao.path(): continue
-            types.append(ao.type())
-            s2s.append(ao.mkScatter())
-        del aos
-        for s2, tp in zip(s2s, types):
-            if s2.dim()!=2: continue
-            bins = [(p.xMin(), p.xMax(), p.y(), p.yErrAvg()) for p in s2.points()] # This stores the bin heights as y-values
-            histos[s2.path()] = bins
-        del s2s
+            if os.path.basename(path).startswith("_"): continue
+            if "/RAW/" in path: continue
+            if hasattr(ao, "mkScatter"):
+                s2 = ao.mkScatter()
+                if s2.dim() != 2: continue
+                bins = [(p.xMin(), p.xMax(), p.y(), p.yErrAvg()) for p in s2.points()]
+                histos[path] = bins
     except Exception as e:
         print("read_histos --- Can't load histos from file '%s': %s" % (path, e))
     return histos
