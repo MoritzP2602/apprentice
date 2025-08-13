@@ -880,7 +880,8 @@ class RationalApproximationSIP():
         start = timer()
         ret = minimize(self.robustObj, x0, bounds=self.box, args = (coeffs,),method = solver, options={'maxiter': 1000,'ftol': 1e-4, 'disp': False})
         end = timer()
-        optstatus = {'message':ret.get('message').decode(),'status':ret.get('status'),'noOfIterations':ret.get('nit'),'time':end-start}
+        msg = ret.get('message')
+        optstatus = {'message': msg.decode() if isinstance(msg, bytes) else msg, 'status':ret.get('status'),'noOfIterations':ret.get('nit'),'time':end-start}
 
         x = ret.get('x')
         robO = ret.get('fun')
