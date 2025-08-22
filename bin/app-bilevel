@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import apprentice as app
+import bilevel
 import numpy as np
 import time
 
@@ -63,6 +64,53 @@ def mkPlotsCorrelation(TO, x0, prefix=""):
     pylab.tight_layout()
     pylab.savefig(prefix+"corr.pdf")
 
+def mkPlotsWeights(old_weights_file, new_weights_file, prefix=""):
+    def read_weights(path):
+        weights = {}
+        try:
+            with open(path, 'r') as f:
+                for line in f:
+                    s = line.strip()
+                    if not s or s.startswith('#'):
+                        continue
+                    parts = s.split(None, 2)
+                    if len(parts) < 2:
+                        continue
+                    if len(parts[0].split('#')) > 1:
+                        continue
+                    obs, val = parts[0], parts[1]
+                    try:
+                        w = float(val)
+                    except ValueError:
+                        continue
+                    weights[obs] = w
+        except FileNotFoundError:
+            weights = {}
+        return weights
+
+    w_old = read_weights(old_weights_file)
+    w_new = read_weights(new_weights_file)
+    seen = set(w_old)
+    obs_list = list(w_old) + [o for o in w_new if o not in seen]
+    if not obs_list:
+        return
+    old_vals = [w_old.get(o, 0.0) for o in obs_list]
+    new_vals = [w_new.get(o, 0.0) for o in obs_list]
+
+    import pylab
+    N = len(obs_list)
+    ind = np.arange(N)
+    jitter = 0.05
+    pylab.figure(figsize=(max(8, N * 0.22), 6))
+    pylab.plot(ind - jitter, old_vals, linestyle='None', marker='o', markersize=5, label='old', color="cornflowerblue")
+    pylab.plot(ind + jitter, new_vals, linestyle='None', marker='s', markersize=5, label='new', color="coral")
+    pylab.xticks(ind, obs_list, rotation=90)
+    pylab.ylabel('weight')
+    pylab.title('Weights comparison')
+    pylab.legend()
+    pylab.tight_layout()
+    pylab.savefig(prefix + 'weights_comparison.pdf', dpi=200)
+
 import optparse, os, sys
 op = optparse.OptionParser(usage=__doc__)
 op.add_option("-v", "--debug", dest="DEBUG", action="store_true", default=False, help="Turn on some debug messages")
@@ -79,8 +127,13 @@ op.add_option("-p", "--plotvalley", dest="PLOTVALLEY", default=False, action = '
 op.add_option("--tol", dest="TOL", default=1e-6, type=float, help="Tolerance for scipy optimize minimize (default: %default)")
 op.add_option("--no-check", dest="NOCHECK", default=False, action="store_true", help="Don't check for sadlepoints (default: %default)")
 
-op.add_option("--objective", dest="OBJECTIVE", default="portfolio")
-op.add_option("--lambda-var", dest="LAMBDA", type="float", default=1.0)
+op.add_option("--objective", dest="OBJECTIVE", choices=["portfolio", "score-mean", "score-median"], default="portfolio", help="Objective function to use for bilevel optimization (default: %default)")
+op.add_option("--lambda-var", dest="LAMBDA", type="float", default=1.0, help="Regularization parameter for bilevel optimization with portfolio (default: %default)")
+op.add_option("--n-0", dest="N_0", type=int, default=10, help="Number of initial points for bilevel optimization, n_0 > number of observables (default: %default)")
+op.add_option("--n-max", dest="N_MAX", type=int, default=20, help="Maximum number of points for bilevel optimization, n_max > n_0 (default: %default)")
+op.add_option("--surrogate", dest="SURROGATE", default=False, action="store_true", help="Surrogate model to use for bilevel optimization (default: %default)")
+op.add_option("--candidates", dest="CANDIDATES", type=int, default=1000, help="Number of candidates for bilevel optimization (default: %default)")
+op.add_option("--exploration", dest="EXPLORATION", type=float, default=(0.3, 0.5, 0.7), help="Exploration parameter for bilevel optimization (default: %default)")
 
 opts, args = op.parse_args()
 
@@ -104,14 +157,15 @@ if opts.MSP is not None:
     x0 = [float(x) for x in opts.MSP.split(",")]
     GOF.setManualStartPoint(x0)
 
-BO = app.bilevel.BilevelObjective(GOF, objective=opts.OBJECTIVE, lambda_var=opts.LAMBDA)
+BO = bilevel.BilevelObjective(GOF, objective=opts.OBJECTIVE, lambda_var=opts.LAMBDA)
 
 import time
 t0=time.time()
-res = BO.optimise()
+best = BO.optimize(n_0=opts.N_0, n_max=opts.N_MAX, survey_inner=opts.SURVEY, restart_inner=opts.RESTART, surrogate=opts.SURROGATE, candidates=opts.CANDIDATES, exploration=opts.EXPLORATION, debug=opts.DEBUG)
+res = best.res
 
 t1=time.time()
-if opts.DEBUG: print(res)
+if opts.DEBUG: print(best)
 
 chi2 = GOF.objective(res.x, unbiased=True)
 ndf = GOF.ndf
@@ -141,6 +195,8 @@ if opts.PLOTVALLEY:
     if not os.path.exists(plotout): os.makedirs(plotout)
     mkPlotsMinimum(GOF, res.x, prefix=plotout+"/")
 
+BO.writeResults(WFILE, opts.OUTDIR)
+mkPlotsWeights(WFILE, os.path.join(opts.OUTDIR, 'best_weights.txt'), prefix=os.path.join(opts.OUTDIR, ''))
 
 import shutil
 shutil.copy(WFILE, os.path.join(opts.OUTDIR, "weights_{}.txt".format(outcommon)))
