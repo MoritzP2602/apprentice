@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import apprentice as app
-import bilevel
 import numpy as np
 import time
 
@@ -157,7 +156,7 @@ if opts.MSP is not None:
     x0 = [float(x) for x in opts.MSP.split(",")]
     GOF.setManualStartPoint(x0)
 
-BO = bilevel.BilevelObjective(GOF, objective=opts.OBJECTIVE, lambda_var=opts.LAMBDA)
+BO = app.bilevel.BilevelObjective(GOF, objective=opts.OBJECTIVE, lambda_var=opts.LAMBDA)
 
 import time
 t0=time.time()
