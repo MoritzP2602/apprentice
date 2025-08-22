@@ -105,7 +105,7 @@ class BilevelObjective:
         self.history.append(IR)
         return IR
 
-    def optimize(self, n_0=1, n_max=20, survey_inner=1, restart_inner=1, surrogate=True, candidates=1000, exploration=(0.2, 0.5, 0.8), debug=False):
+    def optimize(self, n_0=1, n_max=20, survey_inner=1, restart_inner=1, surrogate=False, candidates=1000, exploration=(0.2, 0.5, 0.8), debug=False):
         d = self.n_obs
         if candidates is None or candidates <= 0:
             candidates = 1
