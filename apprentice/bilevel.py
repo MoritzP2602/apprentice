@@ -294,15 +294,3 @@ class BilevelObjective:
             "history": [innerResult_to_dict(h) for h in self.history],
             }
         return json.dumps(data, indent=2)
-
-
-if __name__ == "__main__":
-    import appset
-    import bilevel
-
-    WFILE = "Test-app-bilevel/weights.txt"
-    DATA  = "Test-app-bilevel/data.json"
-    APP   = "Test-app-bilevel/app_5_0.json"
-
-    GOF = appset.TuningObjective2(WFILE, DATA, APP)
-    BO  = bilevel.BilevelObjective(GOF)
