@@ -457,60 +457,8 @@ class BilevelObjective:
             if len(training_weights) == 0 or len(training_objectives) == 0:
                 print("Warning: No training data found in surrogate model")
                 return False
-                
-            # d = self.n_obs
-            # def reduce_dim(W):
-            #     return W[:, : max(1, d - 1)] if d > 1 else W.copy()
-            
-            # X = reduce_dim(training_weights)
             
             model_type = surrogate_data.get('model_type', 'CubicRbf')
-            
-            # if model_type == 'SciPyRbfWrapper' and SciPyRbf is not None:
-            #     class SciPyRbfWrapper:
-            #         def __init__(self, X, y):
-            #             p = X.shape[1] if X.ndim == 2 else 1
-            #             coords = [X[:, j] for j in range(p)]
-            #             self.rbf = SciPyRbf(*coords, y, function='cubic', smooth=1e-12)
-            #             self.p = p
-
-            #         def predict(self, Xq):
-            #             Xq = np.atleast_2d(Xq)
-            #             coords = [Xq[:, j] for j in range(self.p)]
-            #             return self.rbf(*coords)
-                
-            #     self._loaded_surrogate = SciPyRbfWrapper(X, training_objectives)
-            # else:
-            #     class CubicRbf:
-            #         def __init__(self, X, y, nugget=1e-10):
-            #             self.X = np.asarray(X, float)
-            #             self.y = np.asarray(y, float)
-            #             self.n, self.p = self.X.shape if self.X.ndim == 2 else (self.X.shape[0], 1)
-            #             D = self._cdist(self.X, self.X)
-            #             Phi = D ** 3
-            #             P = np.hstack([self.X, np.ones((self.n, 1))])
-            #             top = np.hstack([Phi + nugget * np.eye(self.n), P])
-            #             bottom = np.hstack([P.T, np.zeros((self.p + 1, self.p + 1))])
-            #             K = np.vstack([top, bottom])
-            #             rhs = np.concatenate([self.y, np.zeros(self.p + 1)])
-            #             sol, *_ = np.linalg.lstsq(K, rhs, rcond=None)
-            #             self.gamma = sol[: self.n]
-            #             self.beta = sol[self.n :]
-
-            #         def _cdist(self, A, B):
-            #             A2 = np.sum(A * A, axis=1, keepdims=True)
-            #             B2 = np.sum(B * B, axis=1, keepdims=True).T
-            #             D2 = np.maximum(A2 + B2 - 2.0 * (A @ B.T), 0.0)
-            #             return np.sqrt(D2)
-
-            #         def predict(self, Xq):
-            #             Xq = np.atleast_2d(Xq)
-            #             D = self._cdist(Xq, self.X)
-            #             Phi = D ** 3
-            #             Pq = np.hstack([Xq, np.ones((Xq.shape[0], 1))])
-            #             return Phi @ self.gamma + Pq @ self.beta
-                
-            #     self._loaded_surrogate = CubicRbf(X, training_objectives)
             
             print(f"Pre-trained surrogate model loaded successfully ({model_type}) with {len(training_weights)} training points")
             return True
