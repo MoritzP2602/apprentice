@@ -202,9 +202,13 @@ class BilevelObjective:
             Candidates = self.rng.dirichlet(np.ones(d), size=candidates) if d > 1 else np.ones((candidates, 1))
 
             if rbf is None:
+                if debug:
+                    print("No surrogate model, using random candidate...")
                 w_next = Candidates[0]
 
             else:
+                if debug:
+                    print("Using surrogate model to predict next weights...")
                 Xc = reduce_dim(Candidates)
 
                 s_pred = rbf.predict(Xc)

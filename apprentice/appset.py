@@ -574,6 +574,7 @@ class TuningObjective2(object):
         import time
         t0=time.time()
         for t in range(nrestart):
+            print(f"Restart {t + 1}/{nrestart}", end='\r')
             isSaddle = True
             maxtries=10
             while (isSaddle):
@@ -598,6 +599,7 @@ class TuningObjective2(object):
             if res["fun"] < minobj:
                 minobj = res["fun"]
                 finalres = res
+        print()
         t1=time.time()
         if self._debug:
             print(t1-t0)
