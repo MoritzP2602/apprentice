@@ -3,6 +3,8 @@
 import apprentice as app
 import numpy as np
 import time
+import os
+import sys
 
 def mkPlotsMinimum(TO, x0, y0=None, prefix=""):
     temp = TO._fixIdx
@@ -130,7 +132,8 @@ op.add_option("--objective", dest="OBJECTIVE", choices=["portfolio", "score-mean
 op.add_option("--lambda-var", dest="LAMBDA", type="float", default=1.0, help="Regularization parameter for bilevel optimization with portfolio (default: %default)")
 op.add_option("--n-0", dest="N_0", type=int, default=10, help="Number of initial points for bilevel optimization, n_0 > number of observables (default: %default)")
 op.add_option("--n-max", dest="N_MAX", type=int, default=20, help="Maximum number of points for bilevel optimization, n_max > n_0 (default: %default)")
-op.add_option("--surrogate", dest="SURROGATE", default=False, action="store_true", help="Surrogate model to use for bilevel optimization (default: %default)")
+op.add_option("--surrogate", dest="SURROGATE", default=False, action="store_true", help="Enable surrogate model for bilevel optimization (default: %default)")
+op.add_option("--load-surrogate", dest="LOAD_SURROGATE", default=None, metavar="FILE", help="Load pre-trained surrogate model from FILE. Automatically enables surrogate mode (default: None)")
 op.add_option("--candidates", dest="CANDIDATES", type=int, default=1000, help="Number of candidates for bilevel optimization (default: %default)")
 op.add_option("--exploration", dest="EXPLORATION", type=float, default=(0.3, 0.5, 0.7), help="Exploration parameter for bilevel optimization (default: %default)")
 
@@ -158,9 +161,20 @@ if opts.MSP is not None:
 
 BO = app.bilevel.BilevelObjective(GOF, objective=opts.OBJECTIVE, lambda_var=opts.LAMBDA)
 
+surrogate_enabled = opts.SURROGATE
+if opts.LOAD_SURROGATE is not None:
+    if os.path.exists(opts.LOAD_SURROGATE):
+        success = BO.loadSurrogateModel(opts.LOAD_SURROGATE)
+        if success:
+            surrogate_enabled = True
+        else:
+            print(f"Warning: Failed to load surrogate model from {opts.LOAD_SURROGATE}")
+    else:
+        print(f"Warning: Surrogate file {opts.LOAD_SURROGATE} not found")
+
 import time
 t0=time.time()
-best = BO.optimize(n_0=opts.N_0, n_max=opts.N_MAX, survey_inner=opts.SURVEY, restart_inner=opts.RESTART, surrogate=opts.SURROGATE, candidates=opts.CANDIDATES, exploration=opts.EXPLORATION, debug=opts.DEBUG)
+best = BO.optimize(n_0=opts.N_0, n_max=opts.N_MAX, survey_inner=opts.SURVEY, restart_inner=opts.RESTART, surrogate=surrogate_enabled, candidates=opts.CANDIDATES, exploration=opts.EXPLORATION, debug=opts.DEBUG)
 res = best.res
 
 t1=time.time()

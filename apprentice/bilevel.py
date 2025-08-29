@@ -160,14 +160,20 @@ class BilevelObjective:
                 Xq = np.atleast_2d(Xq)
                 coords = [Xq[:, j] for j in range(self.p)]
                 return self.rbf(*coords)
-            
-        if n_0 < d + 1:
-            if debug: print(f"Warning, n_0 < d + 1; setting n_0 = {d + 1}")
-        n_0 = max(n_0, d + 1)
-        for i in range(n_0):
-            w_0 = self.rng.dirichlet(np.ones(d)) if d > 1 else np.array([1.0])
-            IR = self.evaluate(w_0, survey=survey_inner, restart=restart_inner)
-            if debug: print(f"[init {i + 1}/{n_0}] g={IR.g_value:.6g}")
+        
+        if hasattr(self, '_loaded_surrogate_data') and self._loaded_surrogate_data is not None:
+            if debug: 
+                print("Pre-loaded surrogate detected, skipping initialization")
+            n_0 = 0
+        else:
+            if n_0 < d + 1:
+                if debug: 
+                    print(f"Warning, n_0 < d + 1; setting n_0 = {d + 1}")
+            n_0 = max(n_0, d + 1)
+            for i in range(n_0):
+                w_0 = self.rng.dirichlet(np.ones(d)) if d > 1 else np.array([1.0])
+                IR = self.evaluate(w_0, survey=survey_inner, restart=restart_inner)
+                if debug: print(f"[init {i + 1}/{n_0}] g={IR.g_value:.6g}\n")
 
         if isinstance(exploration, (float, int)):
             nu_seq = [float(exploration)]
@@ -180,10 +186,25 @@ class BilevelObjective:
         def fit_rbf():
             if not surrogate:
                 return None
-            if len(self.history) < max(2, d):
-                return None
-            W = np.array([h.weights for h in self.history], dtype=float)
-            G = np.array([h.g_value for h in self.history], dtype=float)
+            
+            if hasattr(self, '_loaded_surrogate_data') and self._loaded_surrogate_data is not None:
+                loaded_weights = np.array(self._loaded_surrogate_data['training_weights'], dtype=float)
+                loaded_objectives = np.array(self._loaded_surrogate_data['training_objectives'], dtype=float)
+                if len(self.history) > 0:
+                    current_weights = np.array([h.weights for h in self.history], dtype=float)
+                    current_objectives = np.array([h.g_value for h in self.history], dtype=float)
+                    W = np.vstack([loaded_weights, current_weights])
+                    G = np.concatenate([loaded_objectives, current_objectives])
+                else:
+                    W = loaded_weights
+                    G = loaded_objectives
+            
+            else: 
+                if len(self.history) < max(2, d):
+                    return None
+                W = np.array([h.weights for h in self.history], dtype=float)
+                G = np.array([h.g_value for h in self.history], dtype=float)
+                
             X = reduce_dim(W)
             try:
                 if SciPyRbf is not None:
@@ -194,9 +215,41 @@ class BilevelObjective:
                     print(f"Warning, RBF fit failed ({e}), using random candidate")
                 return None
 
-        if n_max < n_0 + 1:
-            print(f"Warning, n_max < n_0 + 1; setting n_max = {n_0 + 20}")
-            n_max = n_0 + 20
+        if n_max < n_0:
+            if len(self.history) > 0:
+                return min(self.history, key=lambda r: r.g_value)
+            elif hasattr(self, '_loaded_surrogate_data') and self._loaded_surrogate_data is not None:
+                if debug: 
+                    print("No history available, cannot return best result")
+                return None
+        
+        if n_max == n_0:
+            if len(self.history) == 0 and hasattr(self, '_loaded_surrogate_data') and self._loaded_surrogate_data is not None:
+                if debug: 
+                    print("No evaluations performed, cannot return result")
+                return None
+            if (surrogate and len(self.history) >= max(2, d) and 
+                not (hasattr(self, '_loaded_surrogate_data') and self._loaded_surrogate_data is not None)):
+                if debug:
+                    print("Fitting final surrogate model...")
+                try:
+                    W = np.array([h.weights for h in self.history], dtype=float)
+                    G = np.array([h.g_value for h in self.history], dtype=float)
+                    X = reduce_dim(W)
+                    if SciPyRbf is not None:
+                        self._final_surrogate = SciPyRbfWrapper(X, G)
+                    else:
+                        self._final_surrogate = CubicRbf(X, G)
+                    if debug:
+                        print("Final surrogate model fitted successfully")
+                except Exception as e:
+                    if debug:
+                        print(f"Warning: Final RBF fit failed ({e})")
+                    self._final_surrogate = None
+            else:
+                self._final_surrogate = None
+            return min(self.history, key=lambda r: r.g_value)
+        
         for n in range(n_0, n_max):
             rbf = fit_rbf()
             Candidates = self.rng.dirichlet(np.ones(d), size=candidates) if d > 1 else np.ones((candidates, 1))
@@ -216,7 +269,16 @@ class BilevelObjective:
                 smax = float(np.max(s_pred))
                 V_s = (s_pred - smin) / (smax - smin) if smax > smin else np.zeros_like(s_pred)
 
-                S = np.array([h.weights for h in self.history], dtype=float)
+                if hasattr(self, '_loaded_surrogate_data') and self._loaded_surrogate_data is not None:
+                    loaded_weights = np.array(self._loaded_surrogate_data['training_weights'], dtype=float)
+                    current_weights = np.array([h.weights for h in self.history], dtype=float) if self.history else np.empty((0, self.n_obs))
+                    if len(current_weights) > 0:
+                        S = np.vstack([loaded_weights, current_weights])
+                    else:
+                        S = loaded_weights
+                else:
+                    S = np.array([h.weights for h in self.history], dtype=float)
+                
                 Xs = reduce_dim(S)
                 diff = Xc[:, None, :] - Xs[None, :, :]
                 dists = np.sqrt(np.sum(diff * diff, axis=2))
@@ -231,9 +293,35 @@ class BilevelObjective:
 
             IR = self.evaluate(w_next, survey=survey_inner, restart=restart_inner)
             if debug:
-                print(f"[iter {(n - n_0) + 1}/{(n_max - n_0)}] g={IR.g_value:.6g}")
+                print(f"[iter {(n - n_0) + 1}/{(n_max - n_0)}] g={IR.g_value:.6g}\n")
 
-        return min(self.history, key=lambda r: r.g_value)
+        if (surrogate and len(self.history) >= max(2, d) and 
+            not (hasattr(self, '_loaded_surrogate_data') and self._loaded_surrogate_data is not None)):
+            if debug:
+                print("Fitting final surrogate model...")
+            try:
+                W = np.array([h.weights for h in self.history], dtype=float)
+                G = np.array([h.g_value for h in self.history], dtype=float)
+                X = reduce_dim(W)
+                if SciPyRbf is not None:
+                    self._final_surrogate = SciPyRbfWrapper(X, G)
+                else:
+                    self._final_surrogate = CubicRbf(X, G)
+                if debug:
+                    print("Final surrogate model fitted successfully")
+            except Exception as e:
+                if debug:
+                    print(f"Warning: Final RBF fit failed ({e})")
+                self._final_surrogate = None
+        else:
+            self._final_surrogate = None
+
+        if len(self.history) > 0:
+            return min(self.history, key=lambda r: r.g_value)
+        else:
+            if debug:
+                print("No history available, cannot return best result")
+            return None
 
     def writeResults(self, wfile, outdir):
         if not hasattr(self, "history") or len(self.history) == 0:
@@ -268,6 +356,11 @@ class BilevelObjective:
                         fout.write(line)
             with open(f"{outdir}/history.json", "w") as f:
                 f.write(self.toJson())
+
+            if (hasattr(self, '_final_surrogate') and self._final_surrogate is not None and
+                not (hasattr(self, '_loaded_surrogate_data') and self._loaded_surrogate_data is not None)):
+                surrogate_path = f"{outdir}/surrogate_model.json"
+                self.saveSurrogateModel(surrogate_path)
         except Exception:
             pass
         return 
@@ -298,3 +391,131 @@ class BilevelObjective:
             "history": [innerResult_to_dict(h) for h in self.history],
             }
         return json.dumps(data, indent=2)
+
+    def saveSurrogateModel(self, filepath):
+        if not hasattr(self, '_final_surrogate') or self._final_surrogate is None:
+            print("Warning: No final surrogate model available to save")
+            return
+            
+        W = np.array([h.weights for h in self.history], dtype=float)
+        G = np.array([h.g_value for h in self.history], dtype=float)
+        d = self.n_obs
+        
+        def reduce_dim(W):
+            return W[:, : max(1, d - 1)] if d > 1 else W.copy()
+        
+        X = reduce_dim(W)
+        
+        surrogate_data = {
+            "model_type": type(self._final_surrogate).__name__,
+            "training_weights": W.tolist(),
+            "training_objectives": G.tolist(),
+            "reduced_dim_inputs": X.tolist(),
+            "n_obs": int(self.n_obs),
+            "obs_names": self.obs_names.tolist(),
+            "model_info": {}
+        }
+        
+        if hasattr(self._final_surrogate, 'gamma') and hasattr(self._final_surrogate, 'beta'):
+            surrogate_data["model_info"] = {
+                "gamma": self._final_surrogate.gamma.tolist(),
+                "beta": self._final_surrogate.beta.tolist(),
+                "X_train": self._final_surrogate.X.tolist(),
+                "y_train": self._final_surrogate.y.tolist(),
+                "n": int(self._final_surrogate.n),
+                "p": int(self._final_surrogate.p)
+            }
+        elif hasattr(self._final_surrogate, 'rbf'):
+            surrogate_data["model_info"] = {
+                "function": "cubic",
+                "smooth": 1e-12,
+                "p": int(self._final_surrogate.p)
+            }
+        
+        try:
+            with open(filepath, 'w') as f:
+                json.dump(surrogate_data, f, indent=2)
+        except Exception as e:
+            print(f"Error saving surrogate model: {e}")
+    
+    def loadSurrogateModel(self, filepath):
+        try:
+            with open(filepath, 'r') as f:
+                surrogate_data = json.load(f)
+        except Exception as e:
+            print(f"Error loading surrogate model: {e}")
+            surrogate_data = None
+        if surrogate_data is None:
+            return False
+            
+        try:
+            self._loaded_surrogate_data = surrogate_data
+            
+            training_weights = np.array(surrogate_data.get('training_weights', []), dtype=float)
+            training_objectives = np.array(surrogate_data.get('training_objectives', []), dtype=float)
+            
+            if len(training_weights) == 0 or len(training_objectives) == 0:
+                print("Warning: No training data found in surrogate model")
+                return False
+                
+            # d = self.n_obs
+            # def reduce_dim(W):
+            #     return W[:, : max(1, d - 1)] if d > 1 else W.copy()
+            
+            # X = reduce_dim(training_weights)
+            
+            model_type = surrogate_data.get('model_type', 'CubicRbf')
+            
+            # if model_type == 'SciPyRbfWrapper' and SciPyRbf is not None:
+            #     class SciPyRbfWrapper:
+            #         def __init__(self, X, y):
+            #             p = X.shape[1] if X.ndim == 2 else 1
+            #             coords = [X[:, j] for j in range(p)]
+            #             self.rbf = SciPyRbf(*coords, y, function='cubic', smooth=1e-12)
+            #             self.p = p
+
+            #         def predict(self, Xq):
+            #             Xq = np.atleast_2d(Xq)
+            #             coords = [Xq[:, j] for j in range(self.p)]
+            #             return self.rbf(*coords)
+                
+            #     self._loaded_surrogate = SciPyRbfWrapper(X, training_objectives)
+            # else:
+            #     class CubicRbf:
+            #         def __init__(self, X, y, nugget=1e-10):
+            #             self.X = np.asarray(X, float)
+            #             self.y = np.asarray(y, float)
+            #             self.n, self.p = self.X.shape if self.X.ndim == 2 else (self.X.shape[0], 1)
+            #             D = self._cdist(self.X, self.X)
+            #             Phi = D ** 3
+            #             P = np.hstack([self.X, np.ones((self.n, 1))])
+            #             top = np.hstack([Phi + nugget * np.eye(self.n), P])
+            #             bottom = np.hstack([P.T, np.zeros((self.p + 1, self.p + 1))])
+            #             K = np.vstack([top, bottom])
+            #             rhs = np.concatenate([self.y, np.zeros(self.p + 1)])
+            #             sol, *_ = np.linalg.lstsq(K, rhs, rcond=None)
+            #             self.gamma = sol[: self.n]
+            #             self.beta = sol[self.n :]
+
+            #         def _cdist(self, A, B):
+            #             A2 = np.sum(A * A, axis=1, keepdims=True)
+            #             B2 = np.sum(B * B, axis=1, keepdims=True).T
+            #             D2 = np.maximum(A2 + B2 - 2.0 * (A @ B.T), 0.0)
+            #             return np.sqrt(D2)
+
+            #         def predict(self, Xq):
+            #             Xq = np.atleast_2d(Xq)
+            #             D = self._cdist(Xq, self.X)
+            #             Phi = D ** 3
+            #             Pq = np.hstack([Xq, np.ones((Xq.shape[0], 1))])
+            #             return Phi @ self.gamma + Pq @ self.beta
+                
+            #     self._loaded_surrogate = CubicRbf(X, training_objectives)
+            
+            print(f"Pre-trained surrogate model loaded successfully ({model_type}) with {len(training_weights)} training points")
+            return True
+            
+        except Exception as e:
+            print(f"Error setting up loaded surrogate model: {e}")
+            self._loaded_surrogate_data = None
+            return False
