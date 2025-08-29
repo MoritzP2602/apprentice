@@ -755,7 +755,7 @@ class TuningObjective2(object):
     def printParams(self, x_):
         x=self.mkPoint(x_)
         slen = max((max([len(p) for p in self.pnames]), 6))
-        x_aligned = dot_aligned(x)
+        x_aligned = dot_aligned([f"{v:.3f}" for v in x])
         plen = max((max([len(p) for p in x_aligned]), 6))
 
         b_dn = dot_aligned(self._SCLR.box[:,0])
