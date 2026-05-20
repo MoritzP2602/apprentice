@@ -751,6 +751,99 @@ class TuningObjective2(object):
                 f.write("{}".format(meta))
             f.write("{}".format(self.printParams(x)))
 
+    def writeUncertainties(self, x_best, fname,
+                           thresholds=(0.01, 0.05, 0.10, 0.20),
+                           npoints=30, tol=1e-4):
+        """
+        Per-parameter uncertainty estimates from 1D scans of the weighted global chi2.
+
+        For each free parameter, fix the others at their best-fit values, scan up
+        and down within the allowed range, and locate where the weighted chi2 has
+        risen by `thresholds` (fractions of chi2_min). If a boundary is reached
+        first, MIN_RANGE / MAX_RANGE is reported.
+
+        x_best : free-parameter vector (same shape as scipy result.x)
+        fname  : output file path
+        """
+        chi2_min = self.objective(x_best)
+
+        out = []
+        out.append("# Uncertainties from 1D scans around the best tune")
+        out.append("# chi2_min (weighted): {:.6f}".format(chi2_min))
+        out.append("# target chi2 at thresholds:")
+        for t in thresholds:
+            out.append("#   {:>3}: {:.6f}".format("{:g}%".format(t*100), chi2_min * (1.0 + t)))
+        out.append("# scan: {} coarse points per direction, bisection tol {:g}".format(npoints, tol))
+        out.append("")
+
+        free_idx_arr = self._freeIdx[0]
+        for i, full_idx in enumerate(free_idx_arr):
+            pname = self.pnames[full_idx]
+            p_best = float(x_best[i])
+            p_min = float(self._bounds[full_idx, 0])
+            p_max = float(self._bounds[full_idx, 1])
+
+            grid_dn, chi2_dn = self._coarseScan1D(x_best, i, p_best, p_min, npoints)
+            grid_up, chi2_up = self._coarseScan1D(x_best, i, p_best, p_max, npoints)
+
+            out.append("parameter: {}".format(pname))
+            out.append("best_fit: {:.6f}".format(p_best))
+            out.append("range: [{:g}, {:g}]".format(p_min, p_max))
+            out.append("")
+            for t in thresholds:
+                target = chi2_min * (1.0 + t)
+                r_dn = self._refineCrossing1D(x_best, i, grid_dn, chi2_dn, target, tol, "MIN_RANGE")
+                r_up = self._refineCrossing1D(x_best, i, grid_up, chi2_up, target, tol, "MAX_RANGE")
+                out.append("{:g}%:".format(t*100))
+                out.append("  down: {}".format(r_dn if isinstance(r_dn, str) else "{:.6f}".format(r_dn)))
+                out.append("  up:   {}".format(r_up if isinstance(r_up, str) else "{:.6f}".format(r_up)))
+                out.append("")
+            out.append("-" * 50)
+            out.append("")
+
+        with open(fname, "w") as f:
+            f.write("\n".join(out))
+
+    def _coarseScan1D(self, x_best, free_idx, p_start, p_end, npoints):
+        """Evaluate weighted chi2 along an even grid from p_start to p_end (inclusive)."""
+        grid = np.linspace(p_start, p_end, npoints + 1)
+        x_work = np.array(x_best, dtype=np.float64, copy=True)
+        chi2 = np.empty(len(grid))
+        for k, p in enumerate(grid):
+            x_work[free_idx] = p
+            chi2[k] = self.objective(x_work)
+        return grid, chi2
+
+    def _refineCrossing1D(self, x_best, free_idx, grid, chi2_grid, target, tol, boundary_label):
+        """First-crossing locator along `grid`; bisect to refine; `boundary_label` if no crossing."""
+        k = None
+        for j in range(1, len(chi2_grid)):
+            if chi2_grid[j] >= target:
+                k = j
+                break
+        if k is None:
+            return boundary_label
+
+        p_lo, p_hi = float(grid[k - 1]), float(grid[k])
+        c_lo, c_hi = float(chi2_grid[k - 1]), float(chi2_grid[k])
+        x_work = np.array(x_best, dtype=np.float64, copy=True)
+
+        for _ in range(40):
+            span = max(abs(p_hi), abs(p_lo), 1e-12)
+            if abs(p_hi - p_lo) <= tol * span:
+                break
+            p_mid = 0.5 * (p_lo + p_hi)
+            x_work[free_idx] = p_mid
+            c_mid = self.objective(x_work)
+            if c_mid < target:
+                p_lo, c_lo = p_mid, c_mid
+            else:
+                p_hi, c_hi = p_mid, c_mid
+
+        if c_hi != c_lo:
+            return p_lo + (target - c_lo) * (p_hi - p_lo) / (c_hi - c_lo)
+        return 0.5 * (p_lo + p_hi)
+
 
     def printParams(self, x_):
         x=self.mkPoint(x_)

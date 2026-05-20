@@ -78,6 +78,7 @@ op.add_option("-f", dest="FORCE", default=False, action = 'store_true', help="Al
 op.add_option("-p", "--plotvalley", dest="PLOTVALLEY", default=False, action = 'store_true', help="Allow overwriting output directory (default: %default)")
 op.add_option("--tol", dest="TOL", default=1e-6, type=float, help="Tolerance for scipy optimize minimize (default: %default)")
 op.add_option("--no-check", dest="NOCHECK", default=False, action="store_true", help="Don't check for sadlepoints (default: %default)")
+op.add_option("--no-uncertainties", dest="NOUNC", default=False, action="store_true", help="Skip per-parameter 1D uncertainty scans (default: %default)")
 opts, args = op.parse_args()
 
 
@@ -130,6 +131,9 @@ except ImportError:
 
 mkPlotsCorrelation(GOF, res.x, opts.OUTDIR+"/{}_".format(outcommon))
 GOF.writeResult(res.x, os.path.join(opts.OUTDIR, "minimum_{}.txt".format(outcommon)), meta=meta)
+if not opts.NOUNC:
+    unc_path = os.path.join(opts.OUTDIR, "uncertainties_{}.txt".format(outcommon))
+    GOF.writeUncertainties(res.x, unc_path)
 if opts.PLOTVALLEY:
     plotout = os.path.join(opts.OUTDIR, "valleys_{}".format(outcommon))
     if not os.path.exists(plotout): os.makedirs(plotout)
