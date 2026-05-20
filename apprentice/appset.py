@@ -844,6 +844,66 @@ class TuningObjective2(object):
             return p_lo + (target - c_lo) * (p_hi - p_lo) / (c_hi - c_lo)
         return 0.5 * (p_lo + p_hi)
 
+    def writeEllipsoid(self, x_best, fname,
+                       thresholds=(0.01, 0.05, 0.10)):
+        """
+        Multi-parameter uncertainty estimates from the Hessian covariance ellipsoid.
+
+        Covariance C = 2 * H^-1 with H = d^2 chi2 / dp^2 at the best fit.
+        Marginalized 1-sigma per parameter is sqrt(C_ii); excursion at the
+        chi2 = chi2_min * (1 + t) level is
+
+            Delta_p_i(t) = sqrt(C_ii * t * chi2_min)
+
+        Values clipped against the allowed range are reported as
+        MIN_RANGE / MAX_RANGE.
+
+        x_best : free-parameter vector (same shape as scipy result.x)
+        fname  : output file path
+        """
+        chi2_min = self.objective(x_best)
+        H = self.hessian(x_best)
+        C = 2.0 * np.linalg.inv(H)
+        sigma = np.sqrt(np.diag(C))
+
+        out = []
+        out.append("# Multi-parameter uncertainties from the Hessian covariance ellipsoid")
+        out.append("# chi2_min (weighted): {:.6f}".format(chi2_min))
+        out.append("# target chi2 at thresholds:")
+        for t in thresholds:
+            out.append("#   {:>3}: {:.6f}".format("{:g}%".format(t*100), chi2_min * (1.0 + t)))
+        out.append("# method: C = 2 * H^-1 at best fit; marginalized sigma_i = sqrt(C_ii);")
+        out.append("#         Delta_p_i(t) = sigma_i * sqrt(t * chi2_min) (Gaussian approx, profiled over other params).")
+        out.append("")
+
+        free_idx_arr = self._freeIdx[0]
+        for i, full_idx in enumerate(free_idx_arr):
+            pname = self.pnames[full_idx]
+            p_best = float(x_best[i])
+            p_min = float(self._bounds[full_idx, 0])
+            p_max = float(self._bounds[full_idx, 1])
+            sig = float(sigma[i])
+
+            out.append("parameter: {}".format(pname))
+            out.append("best_fit: {:.6f}".format(p_best))
+            out.append("range: [{:g}, {:g}]".format(p_min, p_max))
+            out.append("")
+            for t in thresholds:
+                delta = sig * np.sqrt(t * chi2_min)
+                p_dn = p_best - delta
+                p_up = p_best + delta
+                r_dn = "MIN_RANGE" if p_dn < p_min else "{:.6f}".format(p_dn)
+                r_up = "MAX_RANGE" if p_up > p_max else "{:.6f}".format(p_up)
+                out.append("{:g}%:".format(t*100))
+                out.append("  down: {}".format(r_dn))
+                out.append("  up:   {}".format(r_up))
+                out.append("")
+            out.append("-" * 50)
+            out.append("")
+
+        with open(fname, "w") as f:
+            f.write("\n".join(out))
+
 
     def printParams(self, x_):
         x=self.mkPoint(x_)

@@ -79,6 +79,7 @@ op.add_option("-p", "--plotvalley", dest="PLOTVALLEY", default=False, action = '
 op.add_option("--tol", dest="TOL", default=1e-6, type=float, help="Tolerance for scipy optimize minimize (default: %default)")
 op.add_option("--no-check", dest="NOCHECK", default=False, action="store_true", help="Don't check for sadlepoints (default: %default)")
 op.add_option("--no-uncertainties", dest="NOUNC", default=False, action="store_true", help="Skip per-parameter 1D uncertainty scans (default: %default)")
+op.add_option("--no-ellipsoid", dest="NOELL", default=False, action="store_true", help="Skip Hessian-based multi-parameter uncertainty ellipsoid (default: %default)")
 opts, args = op.parse_args()
 
 
@@ -134,6 +135,9 @@ GOF.writeResult(res.x, os.path.join(opts.OUTDIR, "minimum_{}.txt".format(outcomm
 if not opts.NOUNC:
     unc_path = os.path.join(opts.OUTDIR, "uncertainties_{}.txt".format(outcommon))
     GOF.writeUncertainties(res.x, unc_path)
+if not opts.NOELL:
+    ell_path = os.path.join(opts.OUTDIR, "ellipsoid_{}.txt".format(outcommon))
+    GOF.writeEllipsoid(res.x, ell_path)
 if opts.PLOTVALLEY:
     plotout = os.path.join(opts.OUTDIR, "valleys_{}".format(outcommon))
     if not os.path.exists(plotout): os.makedirs(plotout)
