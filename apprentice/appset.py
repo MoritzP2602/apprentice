@@ -862,18 +862,25 @@ class TuningObjective2(object):
         fname  : output file path
         """
         chi2_min = self.objective(x_best)
+        ndf = self.ndf
+        chi2_red = chi2_min / ndf
         H = self.hessian(x_best)
         C = 2.0 * np.linalg.inv(H)
         sigma = np.sqrt(np.diag(C))
+        sigma_red = sigma * np.sqrt(chi2_red)
 
         out = []
         out.append("# Multi-parameter uncertainties from the Hessian covariance ellipsoid")
         out.append("# chi2_min (weighted): {:.6f}".format(chi2_min))
+        out.append("# ndf: {}".format(ndf))
+        out.append("# chi2_min / ndf: {:.6f}".format(chi2_red))
         out.append("# target chi2 at thresholds:")
         for t in thresholds:
             out.append("#   {:>3}: {:.6f}".format("{:g}%".format(t*100), chi2_min * (1.0 + t)))
         out.append("# method: C = 2 * H^-1 at best fit; marginalized sigma_i = sqrt(C_ii);")
         out.append("#         Delta_p_i(t) = sigma_i * sqrt(t * chi2_min) (Gaussian approx, profiled over other params).")
+        out.append("# 1sigma: PDG-rescaled interval (Delta chi2 = chi2_min/ndf): sigma_eff_i = sigma_i * sqrt(chi2_min/ndf),")
+        out.append("#         p_best +/- sigma_eff_i. Falls back to Delta chi2 = 1 when chi2_min/ndf <= 1.")
         out.append("")
 
         free_idx_arr = self._freeIdx[0]
@@ -882,11 +889,20 @@ class TuningObjective2(object):
             p_best = float(x_best[i])
             p_min = float(self._bounds[full_idx, 0])
             p_max = float(self._bounds[full_idx, 1])
-            sig = float(sigma[i])
+            sig_eff = float(sigma_red[i]) if chi2_red > 1.0 else float(sigma[i])
 
             out.append("parameter: {}".format(pname))
             out.append("best_fit: {:.6f}".format(p_best))
             out.append("range: [{:g}, {:g}]".format(p_min, p_max))
+            out.append("")
+            p_dn_1s = p_best - sig_eff
+            p_up_1s = p_best + sig_eff
+            r_dn_1s = "MIN_RANGE" if p_dn_1s < p_min else "{:.6f}".format(p_dn_1s)
+            r_up_1s = "MAX_RANGE" if p_up_1s > p_max else "{:.6f}".format(p_up_1s)
+            out.append("1sigma:")
+            out.append("  sigma: {:.6f}".format(sig_eff))
+            out.append("  down:  {}".format(r_dn_1s))
+            out.append("  up:    {}".format(r_up_1s))
             out.append("")
             for t in thresholds:
                 delta = sig * np.sqrt(t * chi2_min)
