@@ -905,7 +905,7 @@ class TuningObjective2(object):
             out.append("  up:    {}".format(r_up_1s))
             out.append("")
             for t in thresholds:
-                delta = sig * np.sqrt(t * chi2_min)
+                delta = sigma[i] * np.sqrt(t * chi2_min)
                 p_dn = p_best - delta
                 p_up = p_best + delta
                 r_dn = "MIN_RANGE" if p_dn < p_min else "{:.6f}".format(p_dn)
