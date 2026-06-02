@@ -9,6 +9,7 @@ if __name__ == "__main__":
     import optparse, os, sys, h5py
     op = optparse.OptionParser(usage=__doc__)
     op.add_option("-v", "--debug", dest="DEBUG", action="store_true", default=False, help="Turn on some debug messages")
+    op.add_option("-q", "--quiet", dest="QUIET", action="store_true", default=False, help="Suppress progress output")
     op.add_option("-o", dest="OUTPUT", default="approx.json", help="Output filename (default: %default)")
     op.add_option("-w", dest="WEIGHTS", default=None, help="Obervable file (default: %default)")
     op.add_option("-s", dest="SEED", type=int, default=1234, help="Random seed (default: %default)")
@@ -76,7 +77,7 @@ if __name__ == "__main__":
     for num, (X, Y, E) in  enumerate(DATA):
         thisBinId = binids[num]
 
-        if rank==0 or rank==size-1:
+        if not opts.QUIET and (rank==0 or rank==size-1):
             if ((num+1)%opts.MSGEVERY ==0):
                 now = time.time()
                 tel = now - t4

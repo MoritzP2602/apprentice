@@ -567,14 +567,15 @@ class TuningObjective2(object):
         return myreturnvalue
 
     def minimize(self, nstart=1, nrestart=1, sel=slice(None, None, None), method="tnc", tol=1e-6,
-                 saddlePointCheck=True, use_MPI_for_x0 = False):
+                 saddlePointCheck=True, use_MPI_for_x0 = False, quiet=False):
         from scipy import optimize
         minobj = np.Infinity
         finalres = None
         import time
         t0=time.time()
         for t in range(nrestart):
-            print(f"Restart {t + 1}/{nrestart}", end='\r')
+            if not quiet:
+                print(f"Restart {t + 1}/{nrestart}", end='\r')
             isSaddle = True
             maxtries=10
             while (isSaddle):

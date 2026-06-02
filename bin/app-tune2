@@ -66,6 +66,7 @@ def mkPlotsCorrelation(TO, x0, prefix=""):
 import optparse, os, sys
 op = optparse.OptionParser(usage=__doc__)
 op.add_option("-v", "--debug", dest="DEBUG", action="store_true", default=False, help="Turn on some debug messages")
+op.add_option("-q", "--quiet", dest="QUIET", action="store_true", default=False, help="Suppress progress output")
 op.add_option("-o", dest="OUTDIR", default="tune", help="Output directory (default: %default)")
 op.add_option("-e", "--errorapprox", dest="ERRAPP", default=None, help="Approximations of bin uncertainties (default: %default)")
 op.add_option("-s", "--survey", dest="SURVEY", default=1, type=int, help="Size of survey when determining start point (default: %default)")
@@ -104,7 +105,7 @@ if opts.MSP is not None:
 
 import time
 t0=time.time()
-res = GOF.minimize(opts.SURVEY, opts.RESTART, method=opts.ALG, tol=opts.TOL, saddlePointCheck=not opts.NOCHECK)
+res = GOF.minimize(opts.SURVEY, opts.RESTART, method=opts.ALG, tol=opts.TOL, saddlePointCheck=not opts.NOCHECK, quiet=opts.QUIET)
 
 t1=time.time()
 if opts.DEBUG: print(res)
