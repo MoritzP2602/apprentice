@@ -291,10 +291,10 @@ class RationalApproximation(BaseEstimator, RegressorMixin):
             nrm+= q*q
         return np.sqrt(nrm)
 
-    def wraps(self, v):
+    def wraps(self, v, abstol=0.0):
         dec=True
         if self.vmin is not None and self.vmax is not None:
-            if self.vmin > v or self.vmax < v:dec=False
+            if self.vmin - abstol > v or self.vmax + abstol < v:dec=False
         return dec
 
 if __name__=="__main__":

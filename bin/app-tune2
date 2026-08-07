@@ -77,6 +77,7 @@ op.add_option("-l", "--limits", dest="LIMITS", default=None, help="Parameter fil
 op.add_option("-f", dest="FORCE", default=False, action = 'store_true', help="Allow overwriting output directory (default: %default)")
 op.add_option("-p", "--plotvalley", dest="PLOTVALLEY", default=False, action = 'store_true', help="Allow overwriting output directory (default: %default)")
 op.add_option("--tol", dest="TOL", default=1e-6, type=float, help="Tolerance for scipy optimize minimize (default: %default)")
+op.add_option("--filter-tol", dest="FILTERTOL", default=0.0, type=float, help="Envelope filter tolerance in units of the experimental error: a bin is only dropped if the data lies outside [envelope_min - tol*err, envelope_max + tol*err] (default: %default)")
 op.add_option("--no-check", dest="NOCHECK", default=False, action="store_true", help="Don't check for sadlepoints (default: %default)")
 opts, args = op.parse_args()
 
@@ -93,7 +94,7 @@ APP   = args[2]
 
 np.random.seed(opts.SEED)
 
-GOF = app.appset.TuningObjective2(WFILE, DATA, APP, f_errors=opts.ERRAPP, debug=opts.DEBUG)
+GOF = app.appset.TuningObjective2(WFILE, DATA, APP, f_errors=opts.ERRAPP, debug=opts.DEBUG, envelope_tolerance=opts.FILTERTOL)
 if opts.LIMITS is not None: GOF.setLimitsAndFixed(opts.LIMITS)
 
 if opts.MSP is not None:
@@ -130,6 +131,7 @@ except ImportError:
 
 mkPlotsCorrelation(GOF, res.x, opts.OUTDIR+"/{}_".format(outcommon))
 GOF.writeResult(res.x, os.path.join(opts.OUTDIR, "minimum_{}.txt".format(outcommon)), meta=meta)
+GOF.writeFilteredBins(os.path.join(opts.OUTDIR, "filtered_{}.txt".format(outcommon)))
 if opts.PLOTVALLEY:
     plotout = os.path.join(opts.OUTDIR, "valleys_{}".format(outcommon))
     if not os.path.exists(plotout): os.makedirs(plotout)
