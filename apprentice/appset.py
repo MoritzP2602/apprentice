@@ -261,6 +261,8 @@ class TuningObjective2(object):
     def __init__(self, *args, **kwargs):
         self._manual_sp=None;
         self._debug = kwargs["debug"] if kwargs.get("debug") is not None else False
+        self._filtered = [] # (binid, reason) of every bin dropped by mkFromFiles
+        self._envelope_tolerance = float(kwargs["envelope_tolerance"]) if kwargs.get("envelope_tolerance") is not None else 0.0
         if type(args[0]) == str: self.mkFromFiles(*args, **kwargs)
         else:                    self.mkFromData( *args, **kwargs) # NOT implemented --- also add a mkReduced for small scale tests
 
@@ -362,16 +364,18 @@ class TuningObjective2(object):
                 _num = np.where(AS._binids==bid)[0][0]
                 if AS._RA[0]._scaler != AS._RA[_num]._scaler:
                     if self._debug: print("Warning, dropping bin with id {} to guarantee caching works".format(bid))
+                    self._filtered.append((bid, "scaler-mismatch"))
                     continue
-                if not AS._RA[_num].wraps(Y[num]):
+                if not AS._RA[_num].wraps(Y[num], abstol=self._envelope_tolerance * E[num]):
                     if self._debug: print("Warning, dropping bin with id {} as it is not wrapping the data".format(bid))
+                    self._filtered.append((bid, "not-enveloped"))
                     continue
                 else:
                     pass#print("check passed")
-                # check for Enveloped data
                 good.append(num)
             else:
                 if self._debug: print("Warning, dropping bin with id {} as its weight or error is 0. W = {}, E = {}".format(bid,weights[nonzero][num],E[num]))
+                self._filtered.append((bid, "zero-error"))
         self._good = good
 
         if len(good)==0:
@@ -392,6 +396,17 @@ class TuningObjective2(object):
         else:
             self._EAS=None
         self.setAttributes(**kwargs)
+
+    def writeFilteredBins(self, fname):
+        """
+        Write the bins dropped by the filtering in mkFromFiles, one per line, in
+        weight file syntax with weight 0.0 so that the file can be appended to a
+        weight file to reproduce the filtering.
+        """
+        with open(fname, "w") as f:
+            f.write("# Bins removed by apprentice filtering (envelope tolerance = {})\n".format(self._envelope_tolerance))
+            for bid, reason in self._filtered:
+                f.write("{} 0.0 # {}\n".format(bid, reason))
 
     def mkFromData(cls, AS, EAS, Y, E, W2, **kwargs):
         cls._AS = AS
