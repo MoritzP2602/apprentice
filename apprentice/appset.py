@@ -866,10 +866,22 @@ class TuningObjective2(object):
         Multi-parameter uncertainty estimates from the Hessian covariance ellipsoid.
 
         Covariance C = 2 * H^-1 with H = d^2 chi2 / dp^2 at the best fit.
-        Marginalized 1-sigma per parameter is sqrt(C_ii); excursion at the
-        chi2 = chi2_min * (1 + t) level is
+        Marginalized 1-sigma per parameter is sqrt(C_ii / norm); excursion at
+        the chi2_n = chi2_n_min * (1 + t) level is
 
-            Delta_p_i(t) = sqrt(C_ii * t * chi2_min)
+            Delta_p_i(t) = sqrt(C_ii / norm * t * chi2_n)
+
+        Bin weights enter the objective squared, so chi2_min and H both carry a
+        factor w^2 and their raw values depend on how the weight file happens to
+        be normalised. Everything below is therefore expressed via the
+        normalised objective
+
+            chi2_n = chi2 * n_eff / sum(w^2)
+
+        which has the statistics of an ordinary chi2 over n_eff effective bins
+        (Kish count, see the n_eff property) and is invariant under a global
+        rescaling w -> k*w. For uniform weights chi2_n is the unweighted chi2
+        and this reduces to the textbook PDG prescription.
 
         Values clipped against the allowed range are reported as
         MIN_RANGE / MAX_RANGE.
@@ -878,25 +890,43 @@ class TuningObjective2(object):
         fname  : output file path
         """
         chi2_min = self.objective(x_best)
-        ndf = self.ndf
-        chi2_red = chi2_min / ndf
+        n_eff = self.n_eff
+        ndf_eff = self.ndf_eff
+        if ndf_eff <= 0:
+            raise Exception(
+                    "Effective degrees of freedom is {:.2f} <= 0 ({:.2f} effective bins from {} "
+                    "bins, {} free parameters). The weights concentrate on too few bins to "
+                    "estimate uncertainties.".format(ndf_eff, n_eff, len(self), self.nfree))
+
+        # Rescaling that turns the weighted objective into a chi2 over n_eff bins
+        norm = n_eff / np.sum(self._W2)
+        chi2_n = chi2_min * norm
+
         H = self.hessian(x_best)
         C = 2.0 * np.linalg.inv(H)
-        sigma = np.sqrt(np.diag(C))
+        sigma = np.sqrt(np.diag(C) / norm)  # Delta chi2_n = 1 errors
+        chi2_red = chi2_n / ndf_eff
         sigma_red = sigma * np.sqrt(chi2_red)
 
         out = []
         out.append("# Multi-parameter uncertainties from the Hessian covariance ellipsoid")
-        out.append("# chi2_min (weighted): {:.6f}".format(chi2_min))
-        out.append("# ndf: {}".format(ndf))
-        out.append("# chi2_min / ndf: {:.6f}".format(chi2_red))
-        out.append("# target chi2 at thresholds:")
+        out.append("# chi2_min (weighted, as minimised): {:.6f}".format(chi2_min))
+        out.append("# sum(w^2): {:.6f}".format(np.sum(self._W2)))
+        out.append("# bins: {}, effective bins n_eff: {:.2f}, free parameters: {}".format(
+            len(self), n_eff, self.nfree))
+        out.append("# ndf_eff (n_eff - free parameters): {:.2f}".format(ndf_eff))
+        out.append("# chi2_min (normalised): {:.6f}".format(chi2_n))
+        out.append("# chi2_min / ndf_eff (normalised): {:.6f}".format(chi2_red))
+        out.append("# target chi2 at thresholds (normalised):")
         for t in thresholds:
-            out.append("#   {:>3}: {:.6f}".format("{:g}%".format(t*100), chi2_min * (1.0 + t)))
-        out.append("# method: C = 2 * H^-1 at best fit; marginalized sigma_i = sqrt(C_ii);")
-        out.append("#         Delta_p_i(t) = sigma_i * sqrt(t * chi2_min) (Gaussian approx, profiled over other params).")
-        out.append("# 1sigma: PDG-rescaled interval (Delta chi2 = chi2_min/ndf): sigma_eff_i = sigma_i * sqrt(chi2_min/ndf),")
-        out.append("#         p_best +/- sigma_eff_i. Falls back to Delta chi2 = 1 when chi2_min/ndf <= 1.")
+            out.append("#   {:>3}: {:.6f}".format("{:g}%".format(t*100), chi2_n * (1.0 + t)))
+        out.append("# method: C = 2 * H^-1 at best fit; marginalized sigma_i = sqrt(C_ii / norm),")
+        out.append("#         norm = n_eff / sum(w^2), so sigma_i is a Delta chi2_n = 1 error;")
+        out.append("#         Delta_p_i(t) = sigma_i * sqrt(t * chi2_n) (Gaussian approx, profiled over other params).")
+        out.append("# 1sigma: PDG-rescaled interval (Delta chi2_n = chi2_n/ndf_eff): sigma_eff_i = sigma_i * sqrt(chi2_n/ndf_eff),")
+        out.append("#         p_best +/- sigma_eff_i. Falls back to Delta chi2_n = 1 when chi2_n/ndf_eff <= 1.")
+        out.append("# NOTE C = 2*H^-1 is the naive covariance; for strongly non-uniform weights the")
+        out.append("#      correct sandwich form differs in shape, the n_eff rescaling only fixes the scale.")
         out.append("")
 
         free_idx_arr = self._freeIdx[0]
@@ -921,7 +951,7 @@ class TuningObjective2(object):
             out.append("  up:    {}".format(r_up_1s))
             out.append("")
             for t in thresholds:
-                delta = sigma[i] * np.sqrt(t * chi2_min)
+                delta = sigma[i] * np.sqrt(t * chi2_n)
                 p_dn = p_best - delta
                 p_up = p_best + delta
                 r_dn = "MIN_RANGE" if p_dn < p_min else "{:.6f}".format(p_dn)
@@ -1001,7 +1031,26 @@ class TuningObjective2(object):
         return np.sum(np.sign(np.linalg.eigvals(H))) != len(H)
 
     @property
-    def ndf(self): return len(self) - self.dim - len(self._fixIdx[0])
+    def nfree(self): return self.dim - len(self._fixIdx[0])
+
+    @property
+    def ndf(self): return len(self) - self.nfree
+
+    @property
+    def n_eff(self):
+        """
+        Kish effective number of bins, (sum w^2)^2 / sum w^4.
+
+        Equals the plain bin count when all weights are equal and shrinks as the
+        weights concentrate on a subset of bins, e.g. n bins of weight 10 next to
+        n bins of weight 1 count as ~1.02*n rather than 2*n. Invariant under a
+        global rescaling w -> k*w of the weight file.
+        """
+        w2 = self._W2
+        return float(np.sum(w2) ** 2 / np.sum(w2 * w2))
+
+    @property
+    def ndf_eff(self): return self.n_eff - self.nfree
 
 
     def __len__(self): return len(self._AS)
