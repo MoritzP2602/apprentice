@@ -296,7 +296,7 @@ def read_rundata(dirs, pfname="params.dat", verbosity=1):
             if re_pfname and re_pfname.search(os.path.basename(f)):
                 params[d] = app.io.read_paramsfile(f)
             else:
-                if f.endswith("yoda"):
+                if f.endswith(("yoda", "yoda.gz")):
                     try:
                         # Read as a path -> Histo dict
                         hs = app.io.read_histos(f)
@@ -408,12 +408,12 @@ def readApprentice(fname):
 
 def yodaDir2Dict(dname):
     """
-    Recursively find and read all files ending with '.yoad' from directory dname.
+    Recursively find and read all files ending with '.yoda' or '.yoda.gz' from directory dname.
     """
     import apprentice as app
     import pathlib
     bindict = {}
-    for f in pathlib.Path(dname).rglob('*.yoda'):
+    for f in pathlib.Path(dname).rglob('*.yoda*'):
         histos = app.io.read_histos(str(f.resolve()))
         for refname in sorted(histos.keys()):
             bins = histos[refname]
