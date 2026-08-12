@@ -124,14 +124,14 @@ def readInputDataYODA(dirnames, parFileName="params.dat", wfile=None, storeAsH5=
         if wfile is not None:
             observables = list(set(app.io.readObs(wfile)))
             HNAMES = [hn for hn in HNAMES if hn in observables]
-        BNAMES = []
         for hn in HNAMES:
             histos = _histos[hn]
-            nbins = len(list(histos.values())[0])
-            hbins[hn]=nbins
-            for n in range(nbins):
-                BNAMES.append("%s#%i"%(hn, n))
+            hbins[hn] = len(list(histos.values())[0])
 
+        # NB. BNAMES is filled in lockstep with _data/xmin/xmax: a bin that is skipped
+        # below must not leave its name behind, or app-build pairs DATA[num] with
+        # binids[num] and mislabels every bin after the first skipped one.
+        BNAMES = []
         _data, xmin, xmax = [], [], []
         for hn in HNAMES:
             for nb in range(hbins[hn]):
@@ -143,6 +143,7 @@ def readInputDataYODA(dirnames, parFileName="params.dat", wfile=None, storeAsH5=
                     print(f"Skipping bin '{hn}#{nb}': all values are non-finite")
                     continue
                 goodrun = runs[finite_indices[0]]
+                BNAMES.append("%s#%i"%(hn, nb))
                 xmin.append(_histos[hn][goodrun][nb][0])
                 xmax.append(_histos[hn][goodrun][nb][1])
                 USE = np.where((~np.isinf(vals)) & (~np.isnan(vals)) & (~np.isinf(errs)) & (~np.isnan(errs)))
@@ -150,6 +151,9 @@ def readInputDataYODA(dirnames, parFileName="params.dat", wfile=None, storeAsH5=
                 if len(xg.shape)==3:
                     xg=xg.reshape(xg.shape[1:])
                 _data.append([xg, np.array(vals)[USE], np.array(errs)[USE]])
+
+        assert len(BNAMES) == len(_data) == len(xmin) == len(xmax), \
+            "bin ids and data got out of step: {} names, {} data rows".format(len(BNAMES), len(_data))
 
         if storeAsH5 is not None:
             writeInputDataSetH5(storeAsH5, _data, runs, BNAMES, pnames, xmin, xmax)
