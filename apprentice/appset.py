@@ -904,7 +904,22 @@ class TuningObjective2(object):
 
         H = self.hessian(x_best)
         C = 2.0 * np.linalg.inv(H)
-        sigma = np.sqrt(np.diag(C) / norm)  # Delta chi2_n = 1 errors
+        Cii = np.diag(C)
+
+        # At an interior minimum H is positive definite, and then so is H^-1, so every
+        # C_ii is > 0. A negative one means x_best is not an interior minimum -- most
+        # often the minimiser stopped against a box bound -- and the Gaussian error for
+        # that parameter is undefined rather than merely large. Compute sigma only where
+        # it is defined, so we report that explicitly instead of letting sqrt emit a
+        # RuntimeWarning and quietly write nan into the output.
+        defined = Cii > 0
+        evals = np.linalg.eigvalsh(H)
+        onbound = np.array([x_best[i] == self._bounds[fi, 0] or
+                            x_best[i] == self._bounds[fi, 1]
+                            for i, fi in enumerate(self._freeIdx[0])])
+
+        sigma = np.full(len(Cii), np.nan)
+        sigma[defined] = np.sqrt(Cii[defined] / norm)  # Delta chi2_n = 1 errors
         chi2_red = chi2_n / ndf_eff
         sigma_red = sigma * np.sqrt(chi2_red)
 
@@ -927,6 +942,22 @@ class TuningObjective2(object):
         out.append("#         p_best +/- sigma_eff_i. Falls back to Delta chi2_n = 1 when chi2_n/ndf_eff <= 1.")
         out.append("# NOTE C = 2*H^-1 is the naive covariance; for strongly non-uniform weights the")
         out.append("#      correct sandwich form differs in shape, the n_eff rescaling only fixes the scale.")
+        if not defined.all():
+            out.append("#")
+            out.append("# WARNING the Hessian at the best fit point is NOT positive definite:")
+            out.append("#         {} of {} eigenvalues <= 0, smallest {:.6g}, largest {:.6g}.".format(
+                int(np.sum(evals <= 0)), len(evals), evals.min(), evals.max()))
+            out.append("#         The best fit point is therefore not an interior minimum, so the")
+            out.append("#         Gaussian error is undefined for {} of {} free parameters; those are".format(
+                int(np.sum(~defined)), len(defined)))
+            out.append("#         reported as 'undefined' below rather than as a number.")
+            if onbound.any():
+                out.append("#         {} free parameter(s) sit exactly on a bound ({}),".format(
+                    int(np.sum(onbound)),
+                    ", ".join(self.pnames[fi] for fi, ob
+                              in zip(self._freeIdx[0], onbound) if ob)))
+                out.append("#         which is the usual cause: widen those bounds or fix those")
+                out.append("#         parameters, then re-run, before trusting any error here.")
         out.append("")
 
         free_idx_arr = self._freeIdx[0]
@@ -937,10 +968,28 @@ class TuningObjective2(object):
             p_max = float(self._bounds[full_idx, 1])
             sig_eff = float(sigma_red[i]) if chi2_red > 1.0 else float(sigma[i])
 
-            out.append("parameter: {}".format(pname))
+            out.append("parameter: {}{}".format(
+                pname, "   # ONBOUND" if onbound[i] else ""))
             out.append("best_fit: {:.6f}".format(p_best))
             out.append("range: [{:g}, {:g}]".format(p_min, p_max))
             out.append("")
+            if not defined[i]:
+                why = "C_ii = {:.6g} <= 0, Hessian not positive definite".format(Cii[i])
+                if onbound[i]:
+                    why += "; parameter is on a bound"
+                out.append("1sigma:")
+                out.append("  sigma: undefined  # {}".format(why))
+                out.append("  down:  undefined")
+                out.append("  up:    undefined")
+                out.append("")
+                for t in thresholds:
+                    out.append("{:g}%:".format(t*100))
+                    out.append("  down: undefined")
+                    out.append("  up:   undefined")
+                    out.append("")
+                out.append("-" * 50)
+                out.append("")
+                continue
             p_dn_1s = p_best - sig_eff
             p_up_1s = p_best + sig_eff
             r_dn_1s = "MIN_RANGE" if p_dn_1s < p_min else "{:.6f}".format(p_dn_1s)

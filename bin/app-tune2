@@ -45,11 +45,23 @@ def mkPlotsCorrelation(TO, x0, prefix=""):
     COV = np.linalg.inv(H)
     COR = np.zeros_like(COV)
     nd = len(x0)
+    # COV_ii <= 0 means H is not positive definite there, so x0 is not an interior
+    # minimum and the correlations with that parameter are undefined. Leave those
+    # cells blank rather than filling the plot with nan.
+    d = np.diag(COV)
+    undefined = np.logical_not(np.outer(d > 0, d > 0))
     for i in range(nd):
         for j in range(nd):
-            COR[i,j] = COV[i,j]/np.sqrt(COV[i,i]*COV[j,j])
+            if not undefined[i,j]:
+                COR[i,j] = COV[i,j]/np.sqrt(d[i]*d[j])
 
-    mask =  np.tri(COR.shape[0], k=0)
+    if undefined.any():
+        print("Warning: Hessian is not positive definite at the best fit point "
+              "({} of {} parameters have COV_ii <= 0); their correlations are "
+              "left blank in {}corr.pdf".format(int(np.sum(d <= 0)), nd, prefix))
+        sys.stdout.flush()
+
+    mask =  np.logical_or(np.tri(COR.shape[0], k=0).astype(bool), undefined)
     A = np.ma.array(COR, mask=mask)
     import pylab
     pylab.clf()
