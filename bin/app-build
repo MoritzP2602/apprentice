@@ -93,12 +93,12 @@ if __name__ == "__main__":
         # E =  np.log10(_E[USE]) if opts.ISLOG else _E[USE]
 
         if len(X) == 0:
-            print("No data to calculate approximation for {} --- skipping".format(binids[rankIdx[num]]))
+            print("No data to calculate approximation for {} --- skipping".format(thisBinId))
             import sys
             sys.stdout.flush()
             continue
         if len(X) < app.tools.numCoeffsRapp(len(X[0]),order=(M,N)):
-            print("Not enough data ({} vs {}) to calculate approximation for {} --- skipping".format(len(X), app.tools.numCoeffsRapp(len(X[0]), order=(M,N)), binids[rankIdx[num]]))
+            print("Not enough data ({} vs {}) to calculate approximation for {} --- skipping".format(len(X), app.tools.numCoeffsRapp(len(X[0]), order=(M,N)), thisBinId))
             import sys
             sys.stdout.flush()
             continue
