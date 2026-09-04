@@ -180,6 +180,24 @@ def readInputDataYODA(dirnames, parFileName="params.dat", wfile=None, storeAsH5=
 
     return data, binids, pnames, rankIdx, xmin, xmax
 
+def readValidationDataYODA(dirname, parFileName, wfile, pnames, comm=MPI.COMM_WORLD):
+    import apprentice as app
+    import numpy as np
+
+    data = None
+    if comm.Get_rank() == 0:
+        DATA, binids, vpnames, rankIdx, xmin, xmax = readInputDataYODA([dirname], parFileName, wfile, comm=MPI.COMM_SELF)
+        if sorted(vpnames) != sorted(pnames):
+            raise Exception("Parameters in {} {} differ from the ones of the input data {}".format(dirname, vpnames, pnames))
+        perm = [vpnames.index(p) for p in pnames]
+        data = {b: (d[0][:, perm], d[1], d[2]) for b, d in zip(binids, DATA)}
+    data = comm.bcast(data, root=0)
+
+    if len(data) == 0:
+        raise Exception("No usable validation data found in {}".format(dirname))
+
+    return data, np.unique(np.vstack([d[0] for d in data.values()]), axis=0)
+
 def writeInputDataSetH5(fname, data, runs, BNAMES, pnames, xmin, xmax, compression=4):
     import h5py
     import numpy as np
