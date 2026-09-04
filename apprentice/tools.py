@@ -492,6 +492,84 @@ def envelope2YODA(fvals, fout_up="envelope_up.yoda", fout_dn="envelope_dn.yoda",
     yoda.write(Y2Dup, fout_up)
     yoda.write(Y2Ddn, fout_dn)
 
+def pickValidationPoints(DATA, size, seed=1234, comm=None):
+    import numpy as np
+    local = np.unique(np.vstack([d[0] for d in DATA]), axis=0) if len(DATA) > 0 else None
+    ALL   = comm.allgather(local) if comm is not None else [local]
+    grid  = np.unique(np.vstack([a for a in ALL if a is not None]), axis=0)
+
+    nval = int(round(size*len(grid))) if size < 1 else int(size)
+    if nval < 1 or nval >= len(grid):
+        raise Exception("Validation set size {} not compatible with {} anchor points".format(nval, len(grid)))
+
+    sel = np.random.default_rng(seed).choice(len(grid), nval, replace=False)
+    return grid[np.sort(sel)]
+
+def validationIndex(X, VALX):
+    import numpy as np
+    val = {tuple(x): num for num, x in enumerate(VALX)}
+    return np.array([val.get(tuple(x), -1) for x in X], dtype=int)
+
+def validationMeasure(dev, measure):
+    import numpy as np
+    if measure == "mean": return np.mean(dev)
+    return np.array(dev)[np.argsort(-np.abs(dev))][min(int(measure), len(dev)) - 1]
+
+def plotValidation(X, V, D, pnames, fout, errs=False, threshold=3., measure="1"):
+    import numpy as np
+    import matplotlib, os
+    matplotlib.use(os.environ.get("MPL_BACKEND", "Agg"))
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_pdf import PdfPages
+    from matplotlib.colors import Normalize, LogNorm
+
+    mtag = "mean over bins" if measure == "mean" else "max over bins" if int(measure) == 1 else "{}. largest over bins".format(measure)
+
+    if errs:
+        dlabel = r"$(E_\mathrm{true}-E_\mathrm{pred})/E_\mathrm{true}$"
+        vlabel = dlabel + " ({})".format(mtag)
+        vcent  = 0.
+        vext   = np.max(np.abs(V)) if len(V) > 0 else 1.
+        cmap, norm, C = "coolwarm", Normalize(vmin=-vext, vmax=vext), V
+    else:
+        dlabel = r"$|\Delta|/\sigma$"
+        vlabel = dlabel + " ({})".format(mtag)
+        vcent  = threshold
+        pos    = V[V > 0]
+        fac    = min(max(np.max(np.maximum(pos/threshold, threshold/pos)), 10.), 1e4) if len(pos) > 0 else 10.
+        cmap, norm = "RdYlGn_r", LogNorm(vmin=threshold/fac, vmax=threshold*fac)
+        C      = np.clip(V, threshold/fac, threshold*fac)
+
+    with PdfPages(fout) as pdf:
+        for i in range(len(pnames)):
+            for j in range(i+1, len(pnames)):
+                plt.clf()
+                sc = plt.scatter(X[:, i], X[:, j], c=C, cmap=cmap, norm=norm, edgecolors="k", linewidths=0.3)
+                cb = plt.colorbar(sc, label=vlabel)
+                cb.ax.axhline(vcent, color="k", linewidth=1)
+                plt.xlabel(pnames[i])
+                plt.ylabel(pnames[j])
+                plt.title("Validation: {} vs {}".format(pnames[j], pnames[i]))
+                pdf.savefig()
+
+        plt.clf()
+        nbins = min(100, max(5, int(np.sqrt(len(D)))))
+        if errs:
+            plt.hist(D, bins=nbins, color="b", histtype="step")
+        else:
+            dpos = D[D > 0]
+            plt.hist(np.clip(D, np.min(dpos), None) if len(dpos) > 0 else D,
+                     bins=np.logspace(np.log10(np.min(dpos)), np.log10(np.max(dpos)), nbins) if len(dpos) > 0 else nbins,
+                     color="b", histtype="step")
+            plt.xscale("log")
+        plt.yscale("log")
+        plt.axvline(vcent, color="k", linestyle="--")
+        plt.xlabel(dlabel)
+        plt.ylabel("Number of bins")
+        plt.title("Validation: deviation of the individual bins")
+        pdf.savefig()
+        plt.close()
+
 class TuningObjective(object):
 
     def __init__(self, *args, **kwargs):

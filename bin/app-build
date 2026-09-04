@@ -22,6 +22,8 @@ if __name__ == "__main__":
     op.add_option("--msg", dest="MSGEVERY", default=5, type=int, help="Verbosity of progress (default: %default)")
     op.add_option("-t", "--testpoles", dest="TESTPOLES", type=int, default=10, help="Number of multistarts for pole detection (default: %default)")
     op.add_option("--convert", dest="CONVERTINPUT", default=None, help="Option to store input data as hdf, needs argument (default: %default)")
+    op.add_option("--validation-size", dest="VALIDATIONSIZE", type=float, default=None, help="Hold back this many anchor points (fraction of the grid if < 1) to validate the approximations (default: %default)")
+    op.add_option("--validation-measure", dest="VALIDATIONMEASURE", default="1", help="mean or the n-th largest (default: %default)")
     opts, args = op.parse_args()
 
     rank=0
@@ -38,6 +40,10 @@ if __name__ == "__main__":
 
     if opts.MODE not in ["la", "sip", "lasip"]:
         print("Error: specified mode {} not known".format(opts.MODE))
+        sys.exit(1)
+
+    if opts.VALIDATIONMEASURE != "mean" and not (opts.VALIDATIONMEASURE.isdigit() and int(opts.VALIDATIONMEASURE) > 0):
+        print("Error: specified validation measure {} not known, use mean or a positive integer".format(opts.VALIDATIONMEASURE))
         sys.exit(1)
 
     if len(args) == 0:
@@ -65,6 +71,15 @@ if __name__ == "__main__":
     print("[{}] will proceed to calculate approximations for {} objects".format(rank, len(DATA)))
     sys.stdout.flush()
 
+    DEVTHRESHOLD = 3.
+    VALX = app.tools.pickValidationPoints(DATA, opts.VALIDATIONSIZE, opts.SEED, comm) if opts.VALIDATIONSIZE is not None else None
+    if VALX is not None:
+        valdev = [[] for x in VALX]
+        valbad = []
+        if rank==0:
+            print("Holding back {} of the anchor points for validation".format(len(VALX)))
+            sys.stdout.flush()
+
     apps = []
     M, N = [int(x) for x in opts.ORDER.split(",")]
 
@@ -91,6 +106,12 @@ if __name__ == "__main__":
         # X = _X[USE, :]
         # Y =  np.log10(_Y[USE]) if opts.ISLOG else _Y[USE]
         # E =  np.log10(_E[USE]) if opts.ISLOG else _E[USE]
+
+        if VALX is not None:
+            IV    = app.tools.validationIndex(X, VALX)
+            isval = IV >= 0
+            XV, YV, EV, IV = X[isval], Y[isval], E[isval], IV[isval]
+            X, Y, E = X[~isval], Y[~isval], E[~isval]
 
         if len(X) == 0:
             print("No data to calculate approximation for {} --- skipping".format(thisBinId))
@@ -129,9 +150,27 @@ if __name__ == "__main__":
         dapps[thisBinId]= temp.asDict
         binedges[thisBinId] = (xmin[num], xmax[num])
 
+        if VALX is not None and len(XV) > 0:
+            REF = EV if opts.ERRS else YV
+            for nv, xv in enumerate(XV):
+                pred   = temp(xv)
+                absdev = abs(pred - REF[nv])
+                if opts.ERRS:
+                    if REF[nv] == 0: continue
+                    dev = (REF[nv] - pred)/REF[nv]
+                else:
+                    if EV[nv] == 0: continue
+                    dev = absdev/EV[nv]
+                if not np.isfinite(dev): continue
+                reldev = absdev/abs(REF[nv]) if REF[nv] != 0 else np.nan
+                if abs(dev) > DEVTHRESHOLD: valbad.append((thisBinId, IV[nv], dev, absdev, reldev, EV[nv]))
+                valdev[IV[nv]].append(dev)
+
 
     DAPPS = comm.gather(dapps, root=0)
     DEDGE = comm.gather(binedges, root=0)
+    VALDEV = comm.gather(valdev, root=0) if VALX is not None else None
+    VALBAD = comm.gather(valbad, root=0) if VALX is not None else None
     t5   = time.time()
     if rank==0:
         print()
@@ -168,5 +207,31 @@ if __name__ == "__main__":
         with open(opts.OUTPUT, "w") as f: json.dump(JD, f, indent=4, cls=NumpyFloatValuesEncoder)
 
         print("Done --- {} approximations written to {}".format(len(JD), opts.OUTPUT))
+
+        if VALX is not None:
+            DEV = [sum([v[iv] for v in VALDEV], []) for iv in range(len(VALX))]
+            USE = [iv for iv in range(len(VALX)) if len(DEV[iv]) > 0]
+            if len(USE) == 0:
+                print("No validation data available, skipping validation plots")
+            else:
+                V   = np.array([app.tools.validationMeasure(DEV[iv], opts.VALIDATIONMEASURE) for iv in USE])
+                D   = np.concatenate([DEV[iv] for iv in USE])
+                BAD = sorted([b for bad in VALBAD for b in bad], key=lambda x: -abs(x[2]))
+
+                fplot = "{}_validation.pdf".format(os.path.splitext(opts.OUTPUT)[0])
+                app.tools.plotValidation(VALX[USE], V, D, pnames, fplot, errs=opts.ERRS, threshold=DEVTHRESHOLD, measure=opts.VALIDATIONMEASURE)
+
+                fbad = "{}_validation.txt".format(os.path.splitext(opts.OUTPUT)[0])
+                with open(fbad, "w") as f:
+                    f.write("# {}\n".format("\t".join(["binid", "deviation", "absdev", "reldev", "staterr"] + list(pnames))))
+                    for badBinId, iv, dev, absdev, reldev, staterr in BAD:
+                        f.write("{}\t{:.4f}\t{:.6e}\t{:.4f}\t{:.6e}\t{}\n".format(badBinId, dev, absdev, reldev, staterr, "\t".join("{:.6e}".format(x) for x in VALX[iv])))
+
+                if opts.ERRS:
+                    print("Validation: mean relative error deviation {:.3f} over {} bins".format(np.mean(D), len(D)))
+                else:
+                    print("Validation: {}/{} anchor points below {} sigma, worst {:.2f} sigma".format(np.sum(V<DEVTHRESHOLD), len(V), DEVTHRESHOLD, np.max(V)))
+                print("Validation: {}/{} bins deviate by more than {}, written to {}".format(len(BAD), len(D), DEVTHRESHOLD, fbad))
+                print("Validation plots written to {}".format(fplot))
 
     exit(0)
