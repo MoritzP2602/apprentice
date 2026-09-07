@@ -492,18 +492,44 @@ def envelope2YODA(fvals, fout_up="envelope_up.yoda", fout_dn="envelope_dn.yoda",
     yoda.write(Y2Dup, fout_up)
     yoda.write(Y2Ddn, fout_dn)
 
-def pickValidationPoints(DATA, size, seed=1234, comm=None):
+def effectiveSampleSize(Y, E):
+    """Effective number of MC entries behind each bin value: (value/error)^2 = (sumW)^2/sumW^2.
+
+    A bin filled by a single event has value == error exactly, so ESS == 1.
+    A zero error carries no information about the sampling, so it is not filtered (inf);
+    a zero value has nothing behind it either way (0).
+    """
+    import numpy as np
+    Y, E = np.abs(np.asarray(Y, dtype=float)), np.abs(np.asarray(E, dtype=float))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ess = np.where(E > 0, (Y/np.where(E > 0, E, 1.))**2, np.inf)
+    return np.where(Y > 0, ess, 0.)
+
+def filterByESS(DATA, miness):
+    """Drop the bin entries whose effective sample size falls below miness. Returns (kept, dropped)."""
+    import numpy as np
+    ndrop, ntot = 0, 0
+    for num in range(len(DATA)):
+        X, Y, E = DATA[num][0], DATA[num][1], DATA[num][2]
+        keep    = effectiveSampleSize(Y, E) >= miness
+        ntot   += len(keep)
+        ndrop  += int(np.sum(~keep))
+        if not keep.all(): DATA[num] = [np.asarray(X)[keep], np.asarray(Y)[keep], np.asarray(E)[keep]]
+    return ntot - ndrop, ndrop
+
+def splitGridPoints(DATA, size, seed=1234, comm=None):
+    """Split the grid points into (validation, training); size is the training set size."""
     import numpy as np
     local = np.unique(np.vstack([d[0] for d in DATA]), axis=0) if len(DATA) > 0 else None
     ALL   = comm.allgather(local) if comm is not None else [local]
     grid  = np.unique(np.vstack([a for a in ALL if a is not None]), axis=0)
 
-    nval = int(round(size*len(grid))) if size < 1 else int(size)
-    if nval < 1 or nval >= len(grid):
-        raise Exception("Validation set size {} not compatible with {} anchor points".format(nval, len(grid)))
+    ntrain = int(round(size*len(grid))) if size < 1 else int(size)
+    if ntrain < 1 or ntrain >= len(grid):
+        raise Exception("Training set size {} not compatible with {} anchor points".format(ntrain, len(grid)))
 
-    sel = np.random.default_rng(seed).choice(len(grid), nval, replace=False)
-    return grid[np.sort(sel)]
+    sel = np.random.default_rng(seed).choice(len(grid), ntrain, replace=False)
+    return grid[np.setdiff1d(np.arange(len(grid)), sel)], grid[np.sort(sel)]
 
 def validationIndex(X, VALX):
     import numpy as np
@@ -515,60 +541,147 @@ def validationMeasure(dev, measure):
     if measure == "mean": return np.mean(dev)
     return np.array(dev)[np.argsort(-np.abs(dev))][min(int(measure), len(dev)) - 1]
 
-def plotValidation(X, V, D, pnames, fout, errs=False, threshold=3., measure="1"):
-    import numpy as np
+def safeFileName(name):
+    import re
+    return re.sub(r"_+", "_", re.sub(r"[^A-Za-z0-9.-]", "_", str(name))).strip("_") or "unnamed"
+
+def mplPlt():
     import matplotlib, os
     matplotlib.use(os.environ.get("MPL_BACKEND", "Agg"))
     import matplotlib.pyplot as plt
-    from matplotlib.backends.backend_pdf import PdfPages
+    return plt
+
+def plotBinValidation(binid, fout, MOD, PRED, ERR=None, MODV=None, PREDV=None, ERRV=None, nsigma=3.):
+    """Model output (x, with nsigma error bars) against surrogate prediction (y), training | validation."""
+    import numpy as np
+    plt = mplPlt()
+
+    PANELS = [(lab, np.asarray(m, dtype=float), np.asarray(pr, dtype=float),
+               None if e is None else np.abs(np.asarray(e, dtype=float)), mk)
+              for lab, m, pr, e, mk in [("training", MOD, PRED, ERR, "s"), ("validation", MODV, PREDV, ERRV, "o")]
+              if m is not None and len(m) > 0]
+    if len(PANELS) == 0: return
+
+    allv   = np.concatenate([np.concatenate([m, pr]) for lab, m, pr, e, mk in PANELS])
+    lo, hi = np.min(allv), np.max(allv)
+    pad    = 0.05*(hi - lo) if hi > lo else max(abs(hi), 1.)*0.05
+    lo, hi = lo - pad, hi + pad
+
+    fig, axs = plt.subplots(1, len(PANELS), sharex=True, sharey=True,
+                            figsize=(5.0*len(PANELS), 5.4), squeeze=False)
+    for ax, (lab, m, pr, e, mk) in zip(axs[0], PANELS):
+        # the horizontal bar misses the identity line exactly when |prediction - model| > nsigma*sigma
+        ax.plot([lo, hi], [lo, hi], color="g", lw=1.5, zorder=0, label=r"$f(x)=x$")
+        if e is None:
+            # no sigma to test against, so no split into within/beyond
+            SPLIT = [(np.ones(len(m), dtype=bool), "b", None)]
+        else:
+            bad   = np.abs(pr - m) > nsigma*e
+            SPLIT = [(~bad, "b", r"$\leq{:g}\sigma$".format(nsigma)), (bad, "r", r"$>{:g}\sigma$".format(nsigma))]
+        for sel, col, tag in SPLIT:
+            if not np.any(sel): continue
+            ax.errorbar(m[sel], pr[sel], xerr=None if e is None else nsigma*e[sel],
+                        ls="", marker=mk, mfc="none", color=col, ms=4, mew=0.8,
+                        elinewidth=0.6, capsize=1.5,
+                        label=None if tag is None else "{} ({})".format(tag, int(np.sum(sel))))
+        ax.set_xlim(lo, hi)
+        ax.set_ylim(lo, hi)
+        ax.set_box_aspect(1)
+        ax.locator_params(nbins=5)
+        ax.ticklabel_format(axis="both", style="sci", scilimits=(-3, 4), useMathText=True)
+        ax.set_title("{} ({})".format(lab, len(m)))
+        ax.set_xlabel("model output" + ("" if e is None else r" ($\pm{:g}\sigma$)".format(nsigma)))
+        ax.legend(loc="best", fontsize="small")
+    axs[0][0].set_ylabel("surrogate prediction")
+    fig.suptitle(binid, fontsize="small")
+    fig.tight_layout()
+    fig.savefig(fout)
+    plt.close(fig)
+
+def plotValidation(X, V, pnames, outdir, errs=False, threshold=3., measure="1", train=None, trainV=None, valpull=None, trainpull=None):
+    import numpy as np
+    import os
+    plt = mplPlt()
     from matplotlib.colors import Normalize, LogNorm
 
     mtag = "mean over bins" if measure == "mean" else "max over bins" if int(measure) == 1 else "{}. largest over bins".format(measure)
 
+    hastrain = train is not None and len(train) > 0 and trainV is not None and len(trainV) == len(train)
+    ALLV     = np.concatenate([V, trainV]) if hastrain else V
+
     if errs:
         dlabel = r"$(E_\mathrm{true}-E_\mathrm{pred})/E_\mathrm{true}$"
         vlabel = dlabel + " ({})".format(mtag)
+        plabel = r"$(E_\mathrm{pred}-E_\mathrm{true})/E_\mathrm{true}$"
         vcent  = 0.
-        vext   = np.max(np.abs(V)) if len(V) > 0 else 1.
-        cmap, norm, C = "coolwarm", Normalize(vmin=-vext, vmax=vext), V
+        vext   = np.max(np.abs(ALLV)) if len(ALLV) > 0 else 1.
+        cmap, norm = "coolwarm", Normalize(vmin=-vext, vmax=vext)
+        clip   = lambda v: v
     else:
         dlabel = r"$|\Delta|/\sigma$"
         vlabel = dlabel + " ({})".format(mtag)
+        plabel = r"$(f_\mathrm{surrogate}-y)/\sigma$"
         vcent  = threshold
-        pos    = V[V > 0]
+        pos    = ALLV[ALLV > 0]
         fac    = min(max(np.max(np.maximum(pos/threshold, threshold/pos)), 10.), 1e4) if len(pos) > 0 else 10.
         cmap, norm = "RdYlGn_r", LogNorm(vmin=threshold/fac, vmax=threshold*fac)
-        C      = np.clip(V, threshold/fac, threshold*fac)
+        clip   = lambda v: np.clip(v, threshold/fac, threshold*fac)
 
-    with PdfPages(fout) as pdf:
-        for i in range(len(pnames)):
-            for j in range(i+1, len(pnames)):
-                plt.clf()
-                sc = plt.scatter(X[:, i], X[:, j], c=C, cmap=cmap, norm=norm, edgecolors="k", linewidths=0.3)
-                cb = plt.colorbar(sc, label=vlabel)
-                cb.ax.axhline(vcent, color="k", linewidth=1)
-                plt.xlabel(pnames[i])
-                plt.ylabel(pnames[j])
-                plt.title("Validation: {} vs {}".format(pnames[j], pnames[i]))
-                pdf.savefig()
+    PANELS = ([(train, clip(trainV), "s", "training")] if hastrain else []) + [(X, clip(V), "o", "validation")]
+    os.makedirs(outdir, exist_ok=True)
+    written = []
 
-        plt.clf()
-        nbins = min(100, max(5, int(np.sqrt(len(D)))))
-        if errs:
-            plt.hist(D, bins=nbins, color="b", histtype="step")
-        else:
-            dpos = D[D > 0]
-            plt.hist(np.clip(D, np.min(dpos), None) if len(dpos) > 0 else D,
-                     bins=np.logspace(np.log10(np.min(dpos)), np.log10(np.max(dpos)), nbins) if len(dpos) > 0 else nbins,
-                     color="b", histtype="step")
-            plt.xscale("log")
-        plt.yscale("log")
-        plt.axvline(vcent, color="k", linestyle="--")
-        plt.xlabel(dlabel)
-        plt.ylabel("Number of bins")
-        plt.title("Validation: deviation of the individual bins")
-        pdf.savefig()
-        plt.close()
+    for i in range(len(pnames)):
+        for j in range(i+1, len(pnames)):
+            fig, axs = plt.subplots(1, len(PANELS), sharex=True, sharey=True,
+                                    figsize=(5.0*len(PANELS), 5.2), squeeze=False)
+            for ax, (P, CC, mk, lab) in zip(axs[0], PANELS):
+                sc = ax.scatter(P[:, i], P[:, j], marker=mk, c=CC, cmap=cmap, norm=norm, edgecolors="k", linewidths=0.3)
+                ax.set_box_aspect(1)
+                ax.set_title("{} ({})".format(lab, len(P)))
+                ax.set_xlabel(pnames[i])
+            axs[0][0].set_ylabel(pnames[j])
+            cb = fig.colorbar(sc, ax=list(axs[0]), label=vlabel)
+            cb.ax.axhline(vcent, color="k", linewidth=1)
+            fout = os.path.join(outdir, "scatter_{}_{}.pdf".format(safeFileName(pnames[i]), safeFileName(pnames[j])))
+            fig.savefig(fout)
+            plt.close(fig)
+            written.append(fout)
+
+    SETS = []
+    for e, lab, col in [(valpull, "validation", "b"), (trainpull, "training", "r")]:
+        e = np.asarray(e if e is not None else [], dtype=float)
+        e = e[np.isfinite(e)]
+        if len(e) > 0: SETS.append((e, lab, col))
+    if len(SETS) > 0:
+        allp  = np.concatenate([e for e, lab, col in SETS])
+        lt    = max(np.percentile(np.abs(allp), 68), 1e-12)
+        top   = np.max(np.abs(allp))
+        bins  = np.linspace(-lt, lt, 41)
+        if top > lt:
+            logb = np.logspace(np.log10(lt), np.log10(top), 21)[1:]
+            bins = np.concatenate([-logb[::-1], bins, logb])
+
+        fig, ax = plt.subplots(figsize=(7, 5))
+        for e, lab, col in SETS:
+            ax.hist(e, bins=bins, color=col, histtype="step", density=True,
+                    label="{} ({} bins)".format(lab, len(e)))
+        ax.set_xscale("symlog", linthresh=lt)
+        ax.set_yscale("log")
+        ax.axvline(0., color="k", linewidth=1)
+        if not errs:
+            for t in (-threshold, threshold): ax.axvline(t, color="k", linestyle="--", linewidth=1)
+        ax.legend(loc="best", fontsize="small")
+        ax.set_xlabel(plabel)
+        ax.set_ylabel("Probability density")
+        ax.set_title("Validation: standardised error of the individual bins")
+        fout = os.path.join(outdir, "distribution.pdf")
+        fig.tight_layout()
+        fig.savefig(fout)
+        plt.close(fig)
+        written.append(fout)
+
+    return written
 
 class TuningObjective(object):
 

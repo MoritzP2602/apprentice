@@ -22,9 +22,11 @@ if __name__ == "__main__":
     op.add_option("--msg", dest="MSGEVERY", default=5, type=int, help="Verbosity of progress (default: %default)")
     op.add_option("-t", "--testpoles", dest="TESTPOLES", type=int, default=10, help="Number of multistarts for pole detection (default: %default)")
     op.add_option("--convert", dest="CONVERTINPUT", default=None, help="Option to store input data as hdf, needs argument (default: %default)")
-    op.add_option("--validation-size", dest="VALIDATIONSIZE", type=float, default=None, help="Hold back this many anchor points (fraction of the grid if < 1) to validate the approximations (default: %default)")
+    op.add_option("--training-size", dest="TRAININGSIZE", type=float, default=None, help="Use this many grid points (fraction of the grid if < 1) to build the surrogates, validate them on the ones held back (default: %default)")
     op.add_option("--validation-measure", dest="VALIDATIONMEASURE", default="1", help="mean or the n-th largest (default: %default)")
     op.add_option("--validation-dir", dest="VALIDATIONDIR", default=None, help="Validate on the runs in this directory instead of on the held back ones (default: %default)")
+    op.add_option("--min-ess", dest="MINESS", type=float, default=0., help="Drop bin entries whose effective sample size (value/error)^2 falls below this in any run, 0 disables (default: %default)")
+    op.add_option("--validation-plot-per-bin", dest="VALPLOTPERBIN", action="store_true", default=False, help="Additionally plot model output vs surrogate prediction for every single bin (default: %default)")
     opts, args = op.parse_args()
 
     rank=0
@@ -48,12 +50,16 @@ if __name__ == "__main__":
         sys.exit(1)
 
     if opts.VALIDATIONDIR is not None:
-        if opts.VALIDATIONSIZE is None:
-            print("Error: --validation-dir requires --validation-size")
+        if opts.TRAININGSIZE is None:
+            print("Error: --validation-dir requires --training-size")
             sys.exit(1)
         if not os.path.isdir(opts.VALIDATIONDIR):
             print("Error: validation directory {} not found".format(opts.VALIDATIONDIR))
             sys.exit(1)
+
+    if opts.VALPLOTPERBIN and opts.TRAININGSIZE is None:
+        print("Error: --validation-plot-per-bin requires --training-size")
+        sys.exit(1)
 
     if len(args) == 0:
         print("No input specified, exiting")
@@ -76,22 +82,47 @@ if __name__ == "__main__":
         print("{} neither directory nor file, exiting".format(args[0]))
         exit(1)
 
+    if opts.MINESS > 0:
+        nkeep, ndrop = app.tools.filterByESS(DATA, opts.MINESS)
+        KEPT, DROPPED = comm.gather(nkeep, root=0), comm.gather(ndrop, root=0)
+        if rank==0:
+            nk, nd = sum(KEPT), sum(DROPPED)
+            print("Effective sample size filter: dropped {}/{} bin entries with ESS < {:g}".format(nd, nk+nd, opts.MINESS))
+            sys.stdout.flush()
+
     comm.barrier()
     print("[{}] will proceed to calculate approximations for {} objects".format(rank, len(DATA)))
     sys.stdout.flush()
 
     DEVTHRESHOLD = 3.
-    VALX = app.tools.pickValidationPoints(DATA, opts.VALIDATIONSIZE, opts.SEED, comm) if opts.VALIDATIONSIZE is not None else None
+    VALX, TRAINX = app.tools.splitGridPoints(DATA, opts.TRAININGSIZE, opts.SEED, comm) if opts.TRAININGSIZE is not None else (None, None)
+    VALDIR = os.path.join(os.path.dirname(opts.OUTPUT), "validation")
+    GRIDPATHS = app.io.readGridPointPaths(args, opts.PNAME, pnames, comm) if opts.TRAININGSIZE is not None else None
+    if GRIDPATHS is not None and opts.VALIDATIONDIR is not None:
+        GRIDPATHS.update(app.io.readGridPointPaths([opts.VALIDATIONDIR], opts.PNAME, pnames, comm))
     VALDATA, VALP = None, VALX
     if VALX is not None and opts.VALIDATIONDIR is not None:
         VALDATA, VALP = app.io.readValidationDataYODA(opts.VALIDATIONDIR, opts.PNAME, opts.WEIGHTS, pnames, comm)
+        if opts.MINESS > 0:
+            VKEYS = list(VALDATA.keys())
+            VLIST = [list(VALDATA[k]) for k in VKEYS]
+            nkeep, ndrop = app.tools.filterByESS(VLIST, opts.MINESS)
+            VALDATA = {k: tuple(v) for k, v in zip(VKEYS, VLIST)}
+            if rank==0:
+                print("Effective sample size filter: dropped {}/{} bin entries from {}".format(ndrop, nkeep+ndrop, opts.VALIDATIONDIR))
+                sys.stdout.flush()
     if VALX is not None:
         valdev = [[] for x in VALP]
         valbad = []
+        traindev = [[] for x in TRAINX]
+        valpull, trainpull = [], []
+        os.makedirs(VALDIR, exist_ok=True)
         if rank==0:
-            print("Holding back {} of the anchor points for validation".format(len(VALX)))
+            print("Building the surrogates from {} of the grid points, holding back {} for validation".format(len(TRAINX), len(VALX)))
             if VALDATA is not None:
                 print("Validating on {} runs from {}".format(len(VALP), opts.VALIDATIONDIR))
+            if opts.VALPLOTPERBIN:
+                print("Validation: writing one model vs surrogate plot per bin into {}".format(VALDIR))
             sys.stdout.flush()
 
     apps = []
@@ -172,22 +203,45 @@ if __name__ == "__main__":
             for nv, xv in enumerate(XV):
                 pred   = temp(xv)
                 absdev = abs(pred - REF[nv])
-                if opts.ERRS:
-                    if REF[nv] == 0: continue
-                    dev = (REF[nv] - pred)/REF[nv]
-                else:
-                    if EV[nv] == 0: continue
-                    dev = absdev/EV[nv]
-                if not np.isfinite(dev): continue
+                den    = REF[nv] if opts.ERRS else EV[nv]
+                if den == 0: continue
+                dev  = (REF[nv] - pred)/REF[nv] if opts.ERRS else absdev/EV[nv]
+                pull = (pred - REF[nv])/den
+                if not np.isfinite(dev) or not np.isfinite(pull): continue
                 reldev = absdev/abs(REF[nv]) if REF[nv] != 0 else np.nan
                 if abs(dev) > DEVTHRESHOLD: valbad.append((thisBinId, IV[nv], dev, absdev, reldev, EV[nv]))
                 valdev[IV[nv]].append(dev)
+                valpull.append(pull)
+
+            IT   = app.tools.validationIndex(X, TRAINX)
+            TREF = E if opts.ERRS else Y
+            for nt, xt in enumerate(X):
+                if IT[nt] < 0: continue
+                pred = temp(xt)
+                den  = TREF[nt] if opts.ERRS else E[nt]
+                if den == 0: continue
+                dev  = (TREF[nt] - pred)/TREF[nt] if opts.ERRS else abs(pred - TREF[nt])/E[nt]
+                pull = (pred - TREF[nt])/den
+                if not np.isfinite(dev) or not np.isfinite(pull): continue
+                traindev[IT[nt]].append(dev)
+                trainpull.append(pull)
+
+        if VALX is not None and opts.VALPLOTPERBIN:
+            PT = np.array([temp(x) for x in X])
+            PV = np.array([temp(x) for x in XV]) if len(XV) > 0 else np.zeros(0)
+            app.tools.plotBinValidation(thisBinId, os.path.join(VALDIR, "bin_{}.pdf".format(app.tools.safeFileName(thisBinId))),
+                                        E if opts.ERRS else Y, PT, None if opts.ERRS else E,
+                                        EV if opts.ERRS else YV, PV, None if opts.ERRS else EV,
+                                        nsigma=DEVTHRESHOLD)
 
 
     DAPPS = comm.gather(dapps, root=0)
     DEDGE = comm.gather(binedges, root=0)
     VALDEV = comm.gather(valdev, root=0) if VALX is not None else None
     VALBAD = comm.gather(valbad, root=0) if VALX is not None else None
+    TRAINDEV = comm.gather(traindev, root=0) if VALX is not None else None
+    VALPULL = comm.gather(valpull, root=0) if VALX is not None else None
+    TRAINPULL = comm.gather(trainpull, root=0) if VALX is not None else None
     t5   = time.time()
     if rank==0:
         print()
@@ -235,22 +289,26 @@ if __name__ == "__main__":
                 D   = np.concatenate([DEV[iv] for iv in USE])
                 BAD = sorted([b for bad in VALBAD for b in bad], key=lambda x: -abs(x[2]))
 
-                fplot = "{}_validation.pdf".format(os.path.splitext(opts.OUTPUT)[0])
-                app.tools.plotValidation(VALP[USE], V, D, pnames, fplot, errs=opts.ERRS, threshold=DEVTHRESHOLD, measure=opts.VALIDATIONMEASURE)
+                TDEV = [sum([v[it] for v in TRAINDEV], []) for it in range(len(TRAINX))]
+                TUSE = [it for it in range(len(TRAINX)) if len(TDEV[it]) > 0]
+                VT   = np.array([app.tools.validationMeasure(TDEV[it], opts.VALIDATIONMEASURE) for it in TUSE])
+
+                fplots = app.tools.plotValidation(VALP[USE], V, pnames, VALDIR, errs=opts.ERRS, threshold=DEVTHRESHOLD, measure=opts.VALIDATIONMEASURE,
+                                                  train=TRAINX[TUSE], trainV=VT, valpull=sum(VALPULL, []), trainpull=sum(TRAINPULL, []))
 
                 fbad = "{}_validation.txt".format(os.path.splitext(opts.OUTPUT)[0])
                 with open(fbad, "w") as f:
-                    cols = ["binid", "reldev", "absdev", "staterr"] if opts.ERRS else ["binid", "nsigma", "absdev", "reldev", "staterr"]
-                    f.write("# {}\n".format("\t".join(cols + list(pnames))))
+                    cols = ["binid", "relative_error", "absdev", "staterr"] if opts.ERRS else ["binid", "standardised_error", "absdev", "relative_error", "staterr"]
+                    f.write("# {}\n".format("\t".join(cols + ["run"])))
                     for badBinId, iv, dev, absdev, reldev, staterr in BAD:
                         row = "{:.4f}\t{:.6e}\t{:.6e}".format(dev, absdev, staterr) if opts.ERRS else "{:.4f}\t{:.6e}\t{:.4f}\t{:.6e}".format(dev, absdev, reldev, staterr)
-                        f.write("{}\t{}\t{}\n".format(badBinId, row, "\t".join("{:.6e}".format(x) for x in VALP[iv])))
+                        f.write("{}\t{}\t{}\n".format(badBinId, row, GRIDPATHS.get(tuple(VALP[iv]), "unknown")))
 
                 if opts.ERRS:
                     print("Validation: mean relative error deviation {:.3f} over {} bins".format(np.mean(D), len(D)))
                 else:
                     print("Validation: {}/{} validation points below {} sigma, worst {:.2f} sigma".format(np.sum(V<DEVTHRESHOLD), len(V), DEVTHRESHOLD, np.max(V)))
                 print("Validation: {}/{} bins deviate by more than {}, written to {}".format(len(BAD), len(D), DEVTHRESHOLD, fbad))
-                print("Validation plots written to {}".format(fplot))
+                print("Validation: {} scatter plots and distributions written to {}".format(len(fplots), VALDIR))
 
     exit(0)

@@ -198,6 +198,34 @@ def readValidationDataYODA(dirname, parFileName, wfile, pnames, comm=MPI.COMM_WO
 
     return data, np.unique(np.vstack([d[0] for d in data.values()]), axis=0)
 
+def readGridPointPaths(inputs, parFileName="params.dat", pnames=None, comm=MPI.COMM_WORLD):
+    """Map each grid point (tuple of parameter values) onto the run it was read from."""
+    import apprentice as app
+    import numpy as np
+    import os, glob, re, h5py
+
+    paths = None
+    if comm.Get_rank() == 0:
+        paths = {}
+        if os.path.isfile(inputs[0]):
+            with h5py.File(inputs[0], "r") as f:
+                runs = [r.decode() if isinstance(r, bytes) else str(r) for r in f["runs"][:]]
+                X    = f["params"][:]
+            if len(runs) != len(X):
+                print("Warning: {} runs but {} grid points in {}, cannot map bins onto runs".format(len(runs), len(X), inputs[0]))
+                runs = []
+            for r, x in zip(runs, X): paths[tuple(x)] = r
+        else:
+            re_pf = re.compile(parFileName)
+            for d in sorted([item for a in inputs for item in glob.glob(os.path.join(a, "*"))]):
+                for f in glob.glob(os.path.join(d, "*")):
+                    if not re_pf.search(os.path.basename(f)): continue
+                    pars = app.io.read_paramsfile(f)
+                    keys = pnames if pnames is not None else list(pars.keys())
+                    if all(k in pars for k in keys): paths[tuple(pars[k] for k in keys)] = d
+                    break
+    return comm.bcast(paths, root=0)
+
 def writeInputDataSetH5(fname, data, runs, BNAMES, pnames, xmin, xmax, compression=4):
     import h5py
     import numpy as np
@@ -388,7 +416,7 @@ def readPnamesH5(fname, xfield):
     import h5py
 
     with h5py.File(fname, "r") as f:
-        pnames = [str(p) for p in f.get(xfield).attrs["names"]]
+        pnames = [p.decode() if isinstance(p, bytes) else str(p) for p in f.get(xfield).attrs["names"]]
 
     return pnames
 
