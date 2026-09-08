@@ -505,17 +505,15 @@ def effectiveSampleSize(Y, E):
         ess = np.where(E > 0, (Y/np.where(E > 0, E, 1.))**2, np.inf)
     return np.where(Y > 0, ess, 0.)
 
-def filterByESS(DATA, miness):
-    """Drop the bin entries whose effective sample size falls below miness. Returns (kept, dropped)."""
+def selectBinsByESS(DATA, miness, minfrac=1.0):
+    """Mask over bins: keep a bin when at least minfrac of its entries reach an ESS of miness."""
     import numpy as np
-    ndrop, ntot = 0, 0
+    keep = np.zeros(len(DATA), dtype=bool)
     for num in range(len(DATA)):
-        X, Y, E = DATA[num][0], DATA[num][1], DATA[num][2]
-        keep    = effectiveSampleSize(Y, E) >= miness
-        ntot   += len(keep)
-        ndrop  += int(np.sum(~keep))
-        if not keep.all(): DATA[num] = [np.asarray(X)[keep], np.asarray(Y)[keep], np.asarray(E)[keep]]
-    return ntot - ndrop, ndrop
+        Y, E = DATA[num][1], DATA[num][2]
+        if len(Y) == 0: continue
+        keep[num] = np.mean(effectiveSampleSize(Y, E) >= miness) >= minfrac
+    return keep
 
 def splitGridPoints(DATA, size, seed=1234, comm=None):
     """Split the grid points into (validation, training); size is the training set size."""
@@ -598,7 +596,7 @@ def plotBinValidation(binid, fout, MOD, PRED, ERR=None, MODV=None, PREDV=None, E
     fig.savefig(fout)
     plt.close(fig)
 
-def plotValidation(X, V, pnames, outdir, errs=False, threshold=3., measure="1", train=None, trainV=None, valpull=None, trainpull=None):
+def plotValidation(X, V, pnames, outdir, errs=False, threshold=3., measure="1", train=None, trainV=None, valpull=None, trainpull=None, uselog=False):
     import numpy as np
     import os
     plt = mplPlt()
@@ -623,9 +621,16 @@ def plotValidation(X, V, pnames, outdir, errs=False, threshold=3., measure="1", 
         plabel = r"$(f_\mathrm{surrogate}-y)/\sigma$"
         vcent  = threshold
         pos    = ALLV[ALLV > 0]
-        fac    = min(max(np.max(np.maximum(pos/threshold, threshold/pos)), 10.), 1e4) if len(pos) > 0 else 10.
-        cmap, norm = "RdYlGn_r", LogNorm(vmin=threshold/fac, vmax=threshold*fac)
-        clip   = lambda v: np.clip(v, threshold/fac, threshold*fac)
+        cmap   = "RdYlGn_r"
+        if uselog:
+            fac  = min(max(np.max(np.maximum(pos/threshold, threshold/pos)), 10.), 1e4) if len(pos) > 0 else 10.
+            norm = LogNorm(vmin=threshold/fac, vmax=threshold*fac)
+            clip = lambda v: np.clip(v, threshold/fac, threshold*fac)
+        else:
+            # a single wild outlier would flatten a plain 0..max scale, so cut at p99
+            vtop = max(np.percentile(ALLV, 99), threshold) if len(ALLV) > 0 else threshold
+            norm = Normalize(vmin=0., vmax=vtop)
+            clip = lambda v: np.clip(v, 0., vtop)
 
     PANELS = ([(train, clip(trainV), "s", "training")] if hastrain else []) + [(X, clip(V), "o", "validation")]
     os.makedirs(outdir, exist_ok=True)
@@ -655,18 +660,33 @@ def plotValidation(X, V, pnames, outdir, errs=False, threshold=3., measure="1", 
         if len(e) > 0: SETS.append((e, lab, col))
     if len(SETS) > 0:
         allp  = np.concatenate([e for e, lab, col in SETS])
-        lt    = max(np.percentile(np.abs(allp), 68), 1e-12)
         top   = np.max(np.abs(allp))
-        bins  = np.linspace(-lt, lt, 41)
-        if top > lt:
-            logb = np.logspace(np.log10(lt), np.log10(top), 21)[1:]
-            bins = np.concatenate([-logb[::-1], bins, logb])
+        if uselog:
+            lt   = max(np.percentile(np.abs(allp), 68), 1e-12)
+            bins = np.linspace(-lt, lt, 41)
+            if top > lt:
+                logb = np.logspace(np.log10(lt), np.log10(top), 21)[1:]
+                bins = np.concatenate([-logb[::-1], bins, logb])
+            cut = lambda e: e
+        else:
+            # outliers reach many decades, so cut at p99 and let them pile into the edge bins
+            lim  = max(np.percentile(np.abs(allp), 99), 1e-12)
+            bins = np.linspace(-lim, lim, 61)
+            cut  = lambda e: np.clip(e, -lim, lim)
 
         fig, ax = plt.subplots(figsize=(7, 5))
         for e, lab, col in SETS:
-            ax.hist(e, bins=bins, color=col, histtype="step", density=True,
+            ax.hist(cut(e), bins=bins, color=col, histtype="step", density=True,
                     label="{} ({} bins)".format(lab, len(e)))
-        ax.set_xscale("symlog", linthresh=lt)
+        if uselog:
+            ax.set_xscale("symlog", linthresh=lt)
+            # the default symlog ticks put decades inside the linear core, where they collide
+            # with each other and with 0 --- label 0 and the decades outside the core only
+            dlo, dhi = int(np.ceil(np.log10(lt))), int(np.floor(np.log10(top))) if top > 0 else 0
+            if top > 0 and dhi >= dlo:
+                step  = int(np.ceil((dhi - dlo + 1)/4.))
+                decs  = [10.**d for d in range(dlo, dhi+1, max(step, 1))]
+                ax.set_xticks([0.] + sorted([-d for d in decs] + decs))
         ax.set_yscale("log")
         ax.axvline(0., color="k", linewidth=1)
         if not errs:
@@ -674,7 +694,7 @@ def plotValidation(X, V, pnames, outdir, errs=False, threshold=3., measure="1", 
         ax.legend(loc="best", fontsize="small")
         ax.set_xlabel(plabel)
         ax.set_ylabel("Probability density")
-        ax.set_title("Validation: standardised error of the individual bins")
+        ax.set_title("Validation: {} of the individual bins".format("relative deviation" if errs else "standardised error"))
         fout = os.path.join(outdir, "distribution.pdf")
         fig.tight_layout()
         fig.savefig(fout)

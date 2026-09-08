@@ -22,11 +22,17 @@ if __name__ == "__main__":
     op.add_option("--msg", dest="MSGEVERY", default=5, type=int, help="Verbosity of progress (default: %default)")
     op.add_option("-t", "--testpoles", dest="TESTPOLES", type=int, default=10, help="Number of multistarts for pole detection (default: %default)")
     op.add_option("--convert", dest="CONVERTINPUT", default=None, help="Option to store input data as hdf, needs argument (default: %default)")
-    op.add_option("--training-size", dest="TRAININGSIZE", type=float, default=None, help="Use this many grid points (fraction of the grid if < 1) to build the surrogates, validate them on the ones held back (default: %default)")
-    op.add_option("--validation-measure", dest="VALIDATIONMEASURE", default="1", help="mean or the n-th largest (default: %default)")
-    op.add_option("--validation-dir", dest="VALIDATIONDIR", default=None, help="Validate on the runs in this directory instead of on the held back ones (default: %default)")
-    op.add_option("--min-ess", dest="MINESS", type=float, default=0., help="Drop bin entries whose effective sample size (value/error)^2 falls below this in any run, 0 disables (default: %default)")
-    op.add_option("--validation-plot-per-bin", dest="VALPLOTPERBIN", action="store_true", default=False, help="Additionally plot model output vs surrogate prediction for every single bin (default: %default)")
+    op.add_option("--min-ess", dest="MINESS", type=float, default=0., help="Drop bins unless their effective sample size (value/error)^2 reaches this, 0 disables (default: %default)")
+    op.add_option("--min-ess-frac", dest="MINESSFRAC", type=float, default=1.0, help="Fraction of a bin's runs that must reach --min-ess for the bin to be kept (default: %default)")
+
+    og = optparse.OptionGroup(op, "Validation", "Hold back part of the grid, then check the surrogates against it. --training-size switches all of this on.")
+    og.add_option("--training-size", dest="TRAININGSIZE", type=float, default=None, help="Use this many grid points (fraction of the grid if < 1) to build the surrogates, validate them on the ones held back (default: %default)")
+    og.add_option("--validation-measure", dest="VALIDATIONMEASURE", default="1", help="mean or the n-th largest (default: %default)")
+    og.add_option("--validation-dir", dest="VALIDATIONDIR", default=None, help="Validate on the runs in this directory instead of on the held back ones (default: %default)")
+    og.add_option("--validation-plot-per-bin", dest="VALPLOTPERBIN", action="store_true", default=False, help="Additionally plot model output vs surrogate prediction for every single bin (default: %default)")
+    og.add_option("--validation-output", dest="VALIDATIONOUTPUT", default="validation", help="Directory for the validation plots and the deviation list (default: %default)")
+    og.add_option("--validation-log", dest="VALIDATIONLOG", action="store_true", default=False, help="Use logarithmic axes for the scatter colour scale and the distribution x axis")
+    op.add_option_group(og)
     opts, args = op.parse_args()
 
     rank=0
@@ -82,34 +88,38 @@ if __name__ == "__main__":
         print("{} neither directory nor file, exiting".format(args[0]))
         exit(1)
 
-    if opts.MINESS > 0:
-        nkeep, ndrop = app.tools.filterByESS(DATA, opts.MINESS)
-        KEPT, DROPPED = comm.gather(nkeep, root=0), comm.gather(ndrop, root=0)
+    ESSKEEP = app.tools.selectBinsByESS(DATA, opts.MINESS, opts.MINESSFRAC) if opts.MINESS > 0 else None
+    if ESSKEEP is not None:
+        KEPT, TOTAL = comm.gather(int(np.sum(ESSKEEP)), root=0), comm.gather(len(ESSKEEP), root=0)
         if rank==0:
-            nk, nd = sum(KEPT), sum(DROPPED)
-            print("Effective sample size filter: dropped {}/{} bin entries with ESS < {:g}".format(nd, nk+nd, opts.MINESS))
+            nk, nt = sum(KEPT), sum(TOTAL)
+            print("Effective sample size filter: dropped {}/{} bins without {:g}% of their runs at ESS >= {:g}".format(nt-nk, nt, 100*opts.MINESSFRAC, opts.MINESS))
             sys.stdout.flush()
 
     comm.barrier()
-    print("[{}] will proceed to calculate approximations for {} objects".format(rank, len(DATA)))
+    print("[{}] will proceed to calculate approximations for {} objects".format(rank, len(DATA) if ESSKEEP is None else int(np.sum(ESSKEEP))))
     sys.stdout.flush()
 
     DEVTHRESHOLD = 3.
     VALX, TRAINX = app.tools.splitGridPoints(DATA, opts.TRAININGSIZE, opts.SEED, comm) if opts.TRAININGSIZE is not None else (None, None)
-    VALDIR = os.path.join(os.path.dirname(opts.OUTPUT), "validation")
+    VALDIR = os.path.join(os.path.dirname(opts.OUTPUT), opts.VALIDATIONOUTPUT)
     GRIDPATHS = app.io.readGridPointPaths(args, opts.PNAME, pnames, comm) if opts.TRAININGSIZE is not None else None
     if GRIDPATHS is not None and opts.VALIDATIONDIR is not None:
         GRIDPATHS.update(app.io.readGridPointPaths([opts.VALIDATIONDIR], opts.PNAME, pnames, comm))
     VALDATA, VALP = None, VALX
     if VALX is not None and opts.VALIDATIONDIR is not None:
         VALDATA, VALP = app.io.readValidationDataYODA(opts.VALIDATIONDIR, opts.PNAME, opts.WEIGHTS, pnames, comm)
-        if opts.MINESS > 0:
+        if ESSKEEP is not None:
             VKEYS = list(VALDATA.keys())
-            VLIST = [list(VALDATA[k]) for k in VKEYS]
-            nkeep, ndrop = app.tools.filterByESS(VLIST, opts.MINESS)
-            VALDATA = {k: tuple(v) for k, v in zip(VKEYS, VLIST)}
-            if rank==0:
-                print("Effective sample size filter: dropped {}/{} bin entries from {}".format(ndrop, nkeep+ndrop, opts.VALIDATIONDIR))
+            VKEEP = dict(zip(VKEYS, app.tools.selectBinsByESS([list(VALDATA[k]) for k in VKEYS], opts.MINESS, opts.MINESSFRAC)))
+            ndrop = 0
+            for num in range(len(DATA)):
+                if ESSKEEP[num] and not VKEEP.get(binids[num], True):
+                    ESSKEEP[num] = False
+                    ndrop += 1
+            NDROP = comm.gather(ndrop, root=0)
+            if rank==0 and sum(NDROP) > 0:
+                print("Effective sample size filter: dropped a further {} bins on the runs from {}".format(sum(NDROP), opts.VALIDATIONDIR))
                 sys.stdout.flush()
     if VALX is not None:
         valdev = [[] for x in VALP]
@@ -145,6 +155,8 @@ if __name__ == "__main__":
                 eta = datetime.datetime.fromtimestamp(now + ttg)
                 sys.stdout.write("{}[{}] {}/{} (elapsed: {:.1f}s, to go: {:.1f}s, ETA: {})\r".format(80*" " if rank>0 else "", rank, num+1, len(DATA), tel, ttg, eta.strftime('%Y-%m-%d %H:%M:%S')) ,)
                 sys.stdout.flush()
+        if ESSKEEP is not None and not ESSKEEP[num]: continue
+
         # USE = np.where( (_Y>0) ) if opts.ISLOG else np.where( (_E>=0) )
         # from IPython import embed
         # embed()
@@ -293,10 +305,10 @@ if __name__ == "__main__":
                 TUSE = [it for it in range(len(TRAINX)) if len(TDEV[it]) > 0]
                 VT   = np.array([app.tools.validationMeasure(TDEV[it], opts.VALIDATIONMEASURE) for it in TUSE])
 
-                fplots = app.tools.plotValidation(VALP[USE], V, pnames, VALDIR, errs=opts.ERRS, threshold=DEVTHRESHOLD, measure=opts.VALIDATIONMEASURE,
+                fplots = app.tools.plotValidation(VALP[USE], V, pnames, VALDIR, errs=opts.ERRS, threshold=DEVTHRESHOLD, measure=opts.VALIDATIONMEASURE, uselog=opts.VALIDATIONLOG,
                                                   train=TRAINX[TUSE], trainV=VT, valpull=sum(VALPULL, []), trainpull=sum(TRAINPULL, []))
 
-                fbad = "{}_validation.txt".format(os.path.splitext(opts.OUTPUT)[0])
+                fbad = os.path.join(VALDIR, "{}_validation.txt".format(os.path.splitext(os.path.basename(opts.OUTPUT))[0]))
                 with open(fbad, "w") as f:
                     cols = ["binid", "relative_error", "absdev", "staterr"] if opts.ERRS else ["binid", "standardised_error", "absdev", "relative_error", "staterr"]
                     f.write("# {}\n".format("\t".join(cols + ["run"])))
