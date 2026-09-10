@@ -308,7 +308,18 @@ if __name__ == "__main__":
                 fplots = app.tools.plotValidation(VALP[USE], V, pnames, VALDIR, errs=opts.ERRS, threshold=DEVTHRESHOLD, measure=opts.VALIDATIONMEASURE, uselog=opts.VALIDATIONLOG,
                                                   train=TRAINX[TUSE], trainV=VT, valpull=sum(VALPULL, []), trainpull=sum(TRAINPULL, []))
 
-                fbad = os.path.join(VALDIR, "{}_validation.txt".format(os.path.splitext(os.path.basename(opts.OUTPUT))[0]))
+                VALTAG  = os.path.basename(os.path.normpath(opts.VALIDATIONOUTPUT))
+                runName = lambda x: os.path.basename(os.path.normpath(GRIDPATHS.get(tuple(x), "unknown")))
+
+                ftrain = os.path.join(VALDIR, "training_{}.txt".format(VALTAG))
+                with open(ftrain, "w") as f:
+                    for x in TRAINX: f.write("{}\n".format(runName(x)))
+
+                fval = os.path.join(VALDIR, "validation_{}.txt".format(VALTAG))
+                with open(fval, "w") as f:
+                    for iv, v in zip(USE, V): f.write("{}, {:.4f}\n".format(runName(VALP[iv]), v))
+
+                fbad = os.path.join(VALDIR, "worst_bins_{}.txt".format(VALTAG))
                 with open(fbad, "w") as f:
                     cols = ["binid", "relative_error", "absdev", "staterr"] if opts.ERRS else ["binid", "standardised_error", "absdev", "relative_error", "staterr"]
                     f.write("# {}\n".format("\t".join(cols + ["run"])))
@@ -322,5 +333,6 @@ if __name__ == "__main__":
                     print("Validation: {}/{} validation points below {} sigma, worst {:.2f} sigma".format(np.sum(V<DEVTHRESHOLD), len(V), DEVTHRESHOLD, np.max(V)))
                 print("Validation: {}/{} bins deviate by more than {}, written to {}".format(len(BAD), len(D), DEVTHRESHOLD, fbad))
                 print("Validation: {} scatter plots and distributions written to {}".format(len(fplots), VALDIR))
+                print("Validation: {} training and {} validation runs written to {} and {}".format(len(TRAINX), len(USE), ftrain, fval))
 
     exit(0)
