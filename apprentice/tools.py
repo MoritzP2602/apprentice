@@ -549,8 +549,106 @@ def mplPlt():
     import matplotlib.pyplot as plt
     return plt
 
-def plotBinValidation(binid, fout, MOD, PRED, ERR=None, MODV=None, PREDV=None, ERRV=None, nsigma=3.):
-    """Model output (x, with nsigma error bars) against surrogate prediction (y), training | validation."""
+VALGOOD, VALBAD = "#2f974e", "#a50f15"
+VALSTYLE        = {"training": {"color": "coral", "linestyle": "--"}, "validation": {"color": "cornflowerblue", "linestyle": "-"}}
+
+def validationColourMap():
+    import numpy as np
+    from matplotlib import colormaps
+    from matplotlib.colors import ListedColormap
+    return ListedColormap(np.vstack([colormaps["Greens"](np.linspace(0.9, 0.35, 256)),
+                                     colormaps["YlOrRd"](np.linspace(0.45, 1., 256))]))
+
+def splitNorm(lo, cut, hi, uselog=False):
+    import numpy as np
+    from matplotlib.colors import FuncNorm
+    from matplotlib.ticker import MaxNLocator
+    f, g    = (np.log, np.exp) if uselog else (lambda x: x, lambda x: x)
+    a, c, b = f(lo), f(cut), f(hi)
+    def fwd(v):
+        u = f(np.clip(v, lo, hi))
+        return np.where(u <= c, 0.5*(u - a)/(c - a), 0.5 + 0.5*(u - c)/(b - c))
+    def inv(y):
+        y = np.asarray(y, dtype=float)
+        return g(np.where(y <= 0.5, a + 2.*y*(c - a), c + (2.*y - 1.)*(b - c)))
+    def seg(s, e):
+        if uselog: return logTicks(s, e)
+        return [x for x in MaxNLocator(nbins=5, steps=[1, 2, 5, 10]).tick_values(s, e) if s <= x <= e]
+    ticks = sorted(set([cut] + [t for t in seg(lo, cut) + seg(cut, hi) if abs(fwd(t) - 0.5) > 0.06]))
+    return FuncNorm((fwd, inv), vmin=lo, vmax=hi), ticks
+
+def logTicks(s, e, nmax=5):
+    import numpy as np
+    d = 10.**np.arange(np.floor(np.log10(s)), np.ceil(np.log10(e)) + 1)
+    for subs in ([1., 2., 5.], [1., 3.], [1.]):
+        t = [x for x in np.outer(d, subs).ravel() if s <= x <= e]
+        if len(t) <= nmax: return t
+    return t[::int(np.ceil(len(t)/float(nmax)))]
+
+def robustMax(v):
+    import numpy as np
+    p99, top = np.percentile(v, 99), np.max(v)
+    return top if top <= 1.5*p99 else p99
+
+def plotDistribution(ax, SETS, uselog=False, signed=True, unit="bins", cuts=()):
+    import numpy as np
+    from matplotlib.scale import AsinhTransform, LogTransform
+    from matplotlib.ticker import LogFormatter
+
+    SETS = [(np.asarray(v, dtype=float), lab, sty) for v, lab, sty in SETS]
+    SETS = [(v[np.isfinite(v)], lab, sty) for v, lab, sty in SETS]
+    SETS = [(v, lab, sty) for v, lab, sty in SETS if len(v) > 0]
+    if len(SETS) == 0: return
+    allv  = np.concatenate([v for v, lab, sty in SETS])
+    absv  = np.abs(allv)
+    marks = sorted(set(list(cuts) + ([-c for c in cuts] + [0.] if signed else [])))
+    nbins = int(np.clip(np.ceil(2.*max(len(v) for v, lab, sty in SETS)**(1/3.)), 5, 80))
+
+    tr = None
+    if uselog and signed:
+        lt  = max(np.percentile(absv, 68), 1e-12)
+        top = max(np.max(absv), lt)
+        lo, hi, tr = -top, top, AsinhTransform(lt)
+        ax.set_xscale("asinh", linear_width=lt)
+        t = logTicks(0.4*lt, top)
+        ax.set_xticks([0.] + sorted([-x for x in t] + t))
+        ax.xaxis.set_major_formatter("{x:.3g}")
+    elif uselog:
+        pos    = allv[allv > 0]
+        lo, hi = (np.min(pos), np.max(pos)) if len(pos) > 0 else (1., 10.)
+        if hi <= lo: lo, hi = lo/2., hi*2.
+        tr     = LogTransform(10)
+        marks  = [m for m in marks if m > 0]
+        ax.set_xscale("log")
+        ax.xaxis.set_major_formatter(LogFormatter())
+        ax.xaxis.set_minor_formatter(LogFormatter(labelOnlyBase=False))
+    else:
+        lim    = robustMax(absv) or 1.
+        lo, hi = -lim if signed else 0., lim
+
+    fwd   = (lambda x: np.asarray(x, dtype=float)) if tr is None else (lambda x: tr.transform(np.asarray(x, dtype=float)))
+    inv   = (lambda y: np.asarray(y, dtype=float)) if tr is None else (lambda y: tr.inverted().transform(np.asarray(y, dtype=float)))
+    edges = inv(np.linspace(*fwd([lo, hi]), nbins+1))
+    edges[0], edges[-1] = lo, hi
+
+    rng  = "±{:.3g}".format(hi) if lo == -hi else "[{:.3g}, {:.3g}]".format(lo, hi)
+    ymax = 0.
+    for v, lab, sty in SETS:
+        cnt  = np.histogram(v, bins=edges)[0]
+        nout = len(v) - np.sum(cnt)
+        y    = cnt/len(v) if uselog else cnt/(len(v)*np.diff(edges))
+        ymax = max(ymax, np.max(y))
+        ax.stairs(y, edges, linewidth=1.2, **sty,
+                  label="{} ({} {}{})".format(lab, len(v), unit, ", {} outside {}".format(nout, rng) if nout > 0 else ""))
+    for m in marks: ax.axvline(m, color="k", linewidth=1, linestyle="-" if m == 0 else "--")
+
+    a, b = fwd([min([lo] + marks), max([hi] + marks)])
+    ax.set_xlim(*inv([a - 0.02*(b - a), b + 0.02*(b - a)]))
+    ax.set_ylim(0., 1.3*ymax if ymax > 0 else 1.)
+    ax.set_ylabel("Fraction per bin" if uselog else "Probability density")
+    ax.legend(loc="best", fontsize="small")
+
+def plotBinValidation(binid, fout, MOD, PRED, ERR=None, MODV=None, PREDV=None, ERRV=None, nsigma=3., uselog=False):
     import numpy as np
     plt = mplPlt()
 
@@ -565,17 +663,19 @@ def plotBinValidation(binid, fout, MOD, PRED, ERR=None, MODV=None, PREDV=None, E
     pad    = 0.05*(hi - lo) if hi > lo else max(abs(hi), 1.)*0.05
     lo, hi = lo - pad, hi + pad
 
-    fig, axs = plt.subplots(1, len(PANELS), sharex=True, sharey=True,
-                            figsize=(5.0*len(PANELS), 5.4), squeeze=False)
-    for ax, (lab, m, pr, e, mk) in zip(axs[0], PANELS):
-        # the horizontal bar misses the identity line exactly when |prediction - model| > nsigma*sigma
-        ax.plot([lo, hi], [lo, hi], color="g", lw=1.5, zorder=0, label=r"$f(x)=x$")
+    fig, axs = plt.subplots(1, len(PANELS)+1, figsize=(5.0*(len(PANELS)+1), 5.4))
+    for ax in axs[1:len(PANELS)]:
+        ax.sharex(axs[0])
+        ax.sharey(axs[0])
+        ax.tick_params(labelleft=False)
+        ax.yaxis.offsetText.set_visible(False)
+    for ax, (lab, m, pr, e, mk) in zip(axs, PANELS):
+        ax.plot([lo, hi], [lo, hi], color="#898781", lw=1.5, zorder=0, label=r"$f(x)=x$")
         if e is None:
-            # no sigma to test against, so no split into within/beyond
-            SPLIT = [(np.ones(len(m), dtype=bool), "b", None)]
+            SPLIT = [(np.ones(len(m), dtype=bool), VALSTYLE[lab]["color"], None)]
         else:
             bad   = np.abs(pr - m) > nsigma*e
-            SPLIT = [(~bad, "b", r"$\leq{:g}\sigma$".format(nsigma)), (bad, "r", r"$>{:g}\sigma$".format(nsigma))]
+            SPLIT = [(~bad, VALGOOD, r"$\leq{:g}\sigma$".format(nsigma)), (bad, VALBAD, r"$>{:g}\sigma$".format(nsigma))]
         for sel, col, tag in SPLIT:
             if not np.any(sel): continue
             ax.errorbar(m[sel], pr[sel], xerr=None if e is None else nsigma*e[sel],
@@ -590,7 +690,15 @@ def plotBinValidation(binid, fout, MOD, PRED, ERR=None, MODV=None, PREDV=None, E
         ax.set_title("{} ({})".format(lab, len(m)))
         ax.set_xlabel("model output" + ("" if e is None else r" ($\pm{:g}\sigma$)".format(nsigma)))
         ax.legend(loc="best", fontsize="small")
-    axs[0][0].set_ylabel("surrogate prediction")
+    axs[0].set_ylabel("surrogate prediction")
+
+    rel = all(e is None for lab, m, pr, e, mk in PANELS)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        DIST = [((pr - m)/(m if e is None else e), lab, VALSTYLE[lab]) for lab, m, pr, e, mk in PANELS]
+    plotDistribution(axs[-1], DIST, uselog=uselog, signed=True, unit="runs", cuts=() if rel else (nsigma,))
+    axs[-1].set_xlabel(r"$(E_\mathrm{pred}-E_\mathrm{true})/E_\mathrm{true}$" if rel else r"$(f_\mathrm{surrogate}-y)/\sigma$")
+    axs[-1].set_title("distribution")
+    axs[-1].set_box_aspect(1)
     fig.suptitle(binid, fontsize="small")
     fig.tight_layout()
     fig.savefig(fout)
@@ -600,7 +708,8 @@ def plotValidation(X, V, pnames, outdir, errs=False, threshold=3., measure="1", 
     import numpy as np
     import os
     plt = mplPlt()
-    from matplotlib.colors import Normalize, LogNorm
+    from matplotlib.cm import ScalarMappable
+    from matplotlib.colors import Normalize
 
     mtag = "mean over bins" if measure == "mean" else "max over bins" if int(measure) == 1 else "{}. largest over bins".format(measure)
 
@@ -611,91 +720,65 @@ def plotValidation(X, V, pnames, outdir, errs=False, threshold=3., measure="1", 
         dlabel = r"$(E_\mathrm{true}-E_\mathrm{pred})/E_\mathrm{true}$"
         vlabel = dlabel + " ({})".format(mtag)
         plabel = r"$(E_\mathrm{pred}-E_\mathrm{true})/E_\mathrm{true}$"
-        vcent  = 0.
         vext   = np.max(np.abs(ALLV)) if len(ALLV) > 0 else 1.
-        cmap, norm = "coolwarm", Normalize(vmin=-vext, vmax=vext)
-        clip   = lambda v: v
+        cmap, norm, ticks, cut, extend = "coolwarm", Normalize(vmin=-vext, vmax=vext), None, 0., "neither"
     else:
         dlabel = r"$|\Delta|/\sigma$"
         vlabel = dlabel + " ({})".format(mtag)
         plabel = r"$(f_\mathrm{surrogate}-y)/\sigma$"
-        vcent  = threshold
-        pos    = ALLV[ALLV > 0]
-        cmap   = "RdYlGn_r"
         if uselog:
-            fac  = min(max(np.max(np.maximum(pos/threshold, threshold/pos)), 10.), 1e4) if len(pos) > 0 else 10.
-            norm = LogNorm(vmin=threshold/fac, vmax=threshold*fac)
-            clip = lambda v: np.clip(v, threshold/fac, threshold*fac)
+            pos      = ALLV[ALLV > 0]
+            vlo, vhi = min(np.min(pos), threshold/10.) if len(pos) > 0 else threshold/10., max(np.max(ALLV), 10.*threshold)
         else:
-            # a single wild outlier would flatten a plain 0..max scale, so cut at p99
-            vtop = max(np.percentile(ALLV, 99), threshold) if len(ALLV) > 0 else threshold
-            norm = Normalize(vmin=0., vmax=vtop)
-            clip = lambda v: np.clip(v, 0., vtop)
+            vlo, vhi = 0., max(robustMax(ALLV), 2.*threshold)
+        cmap, (norm, ticks), cut = validationColourMap(), splitNorm(vlo, threshold, vhi, uselog), threshold
+        extend = "max" if np.max(ALLV) > vhi else "neither"
 
-    PANELS = ([(train, clip(trainV), "s", "training")] if hastrain else []) + [(X, clip(V), "o", "validation")]
+    PANELS = ([(train, trainV, "s", "training")] if hastrain else []) + [(X, V, "o", "validation")]
     os.makedirs(outdir, exist_ok=True)
     written = []
 
     for i in range(len(pnames)):
         for j in range(i+1, len(pnames)):
-            fig, axs = plt.subplots(1, len(PANELS), sharex=True, sharey=True,
-                                    figsize=(5.0*len(PANELS), 5.2), squeeze=False)
-            for ax, (P, CC, mk, lab) in zip(axs[0], PANELS):
-                sc = ax.scatter(P[:, i], P[:, j], marker=mk, c=CC, cmap=cmap, norm=norm, edgecolors="k", linewidths=0.3)
+            fig, axs = plt.subplots(1, len(PANELS)+1, figsize=(4.4*(len(PANELS)+1) + 1.2, 4.6), layout="constrained")
+            fig.get_layout_engine().set(wspace=0.06)
+            for ax in axs[1:len(PANELS)]:
+                ax.sharex(axs[0])
+                ax.sharey(axs[0])
+                ax.tick_params(labelleft=False)
+            for ax, (P, CC, mk, lab) in zip(axs, PANELS):
+                o = np.argsort(CC)
+                ax.scatter(P[o, i], P[o, j], marker=mk, c=np.clip(CC[o], norm.vmin, norm.vmax), cmap=cmap, norm=norm,
+                           edgecolors="k", linewidths=0.3 if errs else np.where(CC[o] > threshold, 1.2, 0.3))
                 ax.set_box_aspect(1)
                 ax.set_title("{} ({})".format(lab, len(P)))
                 ax.set_xlabel(pnames[i])
-            axs[0][0].set_ylabel(pnames[j])
-            cb = fig.colorbar(sc, ax=list(axs[0]), label=vlabel)
-            cb.ax.axhline(vcent, color="k", linewidth=1)
+            axs[0].set_ylabel(pnames[j])
+            cb = fig.colorbar(ScalarMappable(norm=norm, cmap=cmap), ax=list(axs[:len(PANELS)]), pad=0.02, label=vlabel, extend=extend)
+            cb.ax.axhline(cut, color="k", linewidth=1)
+            if ticks is not None:
+                cb.set_ticks(ticks)
+                cb.formatter = "{x:g}"
+
+            plotDistribution(axs[-1], [(v, lab, VALSTYLE[lab]) for P, v, mk, lab in PANELS], uselog=uselog, signed=errs, unit="runs", cuts=() if errs else (threshold,))
+            axs[-1].set_xlabel(vlabel)
+            axs[-1].set_title("distribution")
             fout = os.path.join(outdir, "scatter_{}_{}.pdf".format(safeFileName(pnames[i]), safeFileName(pnames[j])))
             fig.savefig(fout)
             plt.close(fig)
             written.append(fout)
 
     SETS = []
-    for e, lab, col in [(valpull, "validation", "b"), (trainpull, "training", "r")]:
+    for e, lab in [(trainpull, "training"), (valpull, "validation")]:
         e = np.asarray(e if e is not None else [], dtype=float)
         e = e[np.isfinite(e)]
-        if len(e) > 0: SETS.append((e, lab, col))
+        if len(e) > 0: SETS.append((e, lab, VALSTYLE[lab]))
     if len(SETS) > 0:
-        allp  = np.concatenate([e for e, lab, col in SETS])
-        top   = np.max(np.abs(allp))
-        if uselog:
-            lt   = max(np.percentile(np.abs(allp), 68), 1e-12)
-            bins = np.linspace(-lt, lt, 41)
-            if top > lt:
-                logb = np.logspace(np.log10(lt), np.log10(top), 21)[1:]
-                bins = np.concatenate([-logb[::-1], bins, logb])
-            cut = lambda e: e
-        else:
-            # outliers reach many decades, so cut at p99 and let them pile into the edge bins
-            lim  = max(np.percentile(np.abs(allp), 99), 1e-12)
-            bins = np.linspace(-lim, lim, 61)
-            cut  = lambda e: np.clip(e, -lim, lim)
-
         fig, ax = plt.subplots(figsize=(7, 5))
-        for e, lab, col in SETS:
-            ax.hist(cut(e), bins=bins, color=col, histtype="step", density=True,
-                    label="{} ({} bins)".format(lab, len(e)))
-        if uselog:
-            ax.set_xscale("symlog", linthresh=lt)
-            # the default symlog ticks put decades inside the linear core, where they collide
-            # with each other and with 0 --- label 0 and the decades outside the core only
-            dlo, dhi = int(np.ceil(np.log10(lt))), int(np.floor(np.log10(top))) if top > 0 else 0
-            if top > 0 and dhi >= dlo:
-                step  = int(np.ceil((dhi - dlo + 1)/4.))
-                decs  = [10.**d for d in range(dlo, dhi+1, max(step, 1))]
-                ax.set_xticks([0.] + sorted([-d for d in decs] + decs))
-        ax.set_yscale("log")
-        ax.axvline(0., color="k", linewidth=1)
-        if not errs:
-            for t in (-threshold, threshold): ax.axvline(t, color="k", linestyle="--", linewidth=1)
-        ax.legend(loc="best", fontsize="small")
+        plotDistribution(ax, SETS, uselog=uselog, signed=True, unit="bins", cuts=() if errs else (threshold,))
         ax.set_xlabel(plabel)
-        ax.set_ylabel("Probability density")
         ax.set_title("Validation: {} of the individual bins".format("relative deviation" if errs else "standardised error"))
-        fout = os.path.join(outdir, "distribution.pdf")
+        fout = os.path.join(outdir, "{}_all_bins.pdf".format("relative_deviations" if errs else "standardised_errors"))
         fig.tight_layout()
         fig.savefig(fout)
         plt.close(fig)

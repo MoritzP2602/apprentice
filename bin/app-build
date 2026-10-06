@@ -31,7 +31,7 @@ if __name__ == "__main__":
     og.add_option("--validation-dir", dest="VALIDATIONDIR", default=None, help="Validate on the runs in this directory instead of on the held back ones (default: %default)")
     og.add_option("--validation-plot-per-bin", dest="VALPLOTPERBIN", action="store_true", default=False, help="Additionally plot model output vs surrogate prediction for every single bin (default: %default)")
     og.add_option("--validation-output", dest="VALIDATIONOUTPUT", default="validation", help="Directory for the validation plots and the deviation list (default: %default)")
-    og.add_option("--validation-log", dest="VALIDATIONLOG", action="store_true", default=False, help="Use logarithmic axes for the scatter colour scale and the distribution x axis")
+    og.add_option("--validation-log", dest="VALIDATIONLOG", action="store_true", default=False, help="Use logarithmic colour scales in the scatter plots and a logarithmic x axis for all distributions")
     op.add_option_group(og)
     opts, args = op.parse_args()
 
@@ -244,7 +244,7 @@ if __name__ == "__main__":
             app.tools.plotBinValidation(thisBinId, os.path.join(VALDIR, "bin_{}.pdf".format(app.tools.safeFileName(thisBinId))),
                                         E if opts.ERRS else Y, PT, None if opts.ERRS else E,
                                         EV if opts.ERRS else YV, PV, None if opts.ERRS else EV,
-                                        nsigma=DEVTHRESHOLD)
+                                        nsigma=DEVTHRESHOLD, uselog=opts.VALIDATIONLOG)
 
 
     DAPPS = comm.gather(dapps, root=0)
@@ -308,24 +308,23 @@ if __name__ == "__main__":
                 fplots = app.tools.plotValidation(VALP[USE], V, pnames, VALDIR, errs=opts.ERRS, threshold=DEVTHRESHOLD, measure=opts.VALIDATIONMEASURE, uselog=opts.VALIDATIONLOG,
                                                   train=TRAINX[TUSE], trainV=VT, valpull=sum(VALPULL, []), trainpull=sum(TRAINPULL, []))
 
-                VALTAG  = os.path.basename(os.path.normpath(opts.VALIDATIONOUTPUT))
                 runName = lambda x: os.path.basename(os.path.normpath(GRIDPATHS.get(tuple(x), "unknown")))
 
-                ftrain = os.path.join(VALDIR, "training_{}.txt".format(VALTAG))
+                ftrain = os.path.join(VALDIR, "training.txt")
                 with open(ftrain, "w") as f:
                     for x in TRAINX: f.write("{}\n".format(runName(x)))
 
-                fval = os.path.join(VALDIR, "validation_{}.txt".format(VALTAG))
+                fval = os.path.join(VALDIR, "validation.txt")
                 with open(fval, "w") as f:
                     for iv, v in zip(USE, V): f.write("{}, {:.4f}\n".format(runName(VALP[iv]), v))
 
-                fbad = os.path.join(VALDIR, "worst_bins_{}.txt".format(VALTAG))
+                fbad = os.path.join(VALDIR, "worst_bins.txt")
                 with open(fbad, "w") as f:
-                    cols = ["binid", "relative_error", "absdev", "staterr"] if opts.ERRS else ["binid", "standardised_error", "absdev", "relative_error", "staterr"]
-                    f.write("# {}\n".format("\t".join(cols + ["run"])))
+                    cols = ["relative_error", "absdev", "staterr"] if opts.ERRS else ["standardised_error", "absdev", "staterr", "relative_error"]
+                    f.write("# {}\n".format("\t".join(["binid", "run"] + cols)))
                     for badBinId, iv, dev, absdev, reldev, staterr in BAD:
-                        row = "{:.4f}\t{:.6e}\t{:.6e}".format(dev, absdev, staterr) if opts.ERRS else "{:.4f}\t{:.6e}\t{:.4f}\t{:.6e}".format(dev, absdev, reldev, staterr)
-                        f.write("{}\t{}\t{}\n".format(badBinId, row, GRIDPATHS.get(tuple(VALP[iv]), "unknown")))
+                        row = "{:.4f}\t{:.6e}\t{:.6e}".format(dev, absdev, staterr) if opts.ERRS else "{:.4f}\t{:.6e}\t{:.6e}\t{:.4f}".format(dev, absdev, staterr, reldev)
+                        f.write("{}\t{}\t{}\n".format(badBinId, GRIDPATHS.get(tuple(VALP[iv]), "unknown"), row))
 
                 if opts.ERRS:
                     print("Validation: mean relative error deviation {:.3f} over {} bins".format(np.mean(D), len(D)))
