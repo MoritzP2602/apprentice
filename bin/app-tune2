@@ -41,27 +41,33 @@ def mkPlotsMinimum(TO, x0, y0=None, prefix=""):
         pylab.savefig(prefix+"valley_{}.pdf".format(i))
 
 def mkPlotsCorrelation(TO, x0, prefix=""):
-    H=TO.hessian(x0)
-    COV = np.linalg.inv(H)
+    COV = TO.covariance(x0)
     COR = np.zeros_like(COV)
     nd = len(x0)
     for i in range(nd):
         for j in range(nd):
             COR[i,j] = COV[i,j]/np.sqrt(COV[i,i]*COV[j,j])
+    if np.isnan(COR).any(): print("Warning: correlations of parameters on a bound or with a non positive definite Hessian left blank in {}corr.pdf".format(prefix))
 
-    mask =  np.tri(COR.shape[0], k=0)
+    mask =  np.tri(COR.shape[0], k=0) + np.isnan(COR)
     A = np.ma.array(COR, mask=mask)
     import pylab
     pylab.clf()
     bb = pylab.imshow(A, vmin=-1, vmax=1, cmap="RdBu")
+    pnames = np.array(TO.pnames)[TO._freeIdx]
     locs, labels = pylab.yticks()
-    pylab.yticks([i for i in range(nd)], TO.pnames, rotation=00)
+    pylab.yticks([i for i in range(nd)], pnames, rotation=00)
     locs, labels = pylab.xticks()
-    pylab.xticks([i for i in range(nd)], TO.pnames, rotation=90)
+    pylab.xticks([i for i in range(nd)], pnames, rotation=90)
     cbar = pylab.colorbar(bb, extend='both')
 
     pylab.tight_layout()
     pylab.savefig(prefix+"corr.pdf")
+
+def deltaChi2(spec, chi2, ndf):
+    if spec == "chi2":     return chi2
+    if spec == "chi2/ndf": return chi2/ndf
+    return float(spec[:-1])*chi2/100. if spec.endswith("%") else float(spec)
 
 import optparse, os, sys
 op = optparse.OptionParser(usage=__doc__)
@@ -79,11 +85,20 @@ op.add_option("-p", "--plotvalley", dest="PLOTVALLEY", default=False, action = '
 op.add_option("--tol", dest="TOL", default=1e-6, type=float, help="Tolerance for scipy optimize minimize (default: %default)")
 op.add_option("--filter-tol", dest="FILTERTOL", default=0.0, type=float, help="Envelope filter tolerance in units of the experimental error: a bin is only dropped if the data lies outside [envelope_min - tol*err, envelope_max + tol*err] (default: %default)")
 op.add_option("--no-check", dest="NOCHECK", default=False, action="store_true", help="Don't check for sadlepoints (default: %default)")
+op.add_option("--delta-chi2", dest="DELTACHI2", default="1", help="Increase of the chi2 at which the parameter uncertainties are quoted: a number, a percentage of the chi2 at the best fit point (e.g. 10%), chi2/ndf (equivalent to scaling the data errors to chi2/ndf = 1) or chi2 (default: %default)")
+op.add_option("--profile", dest="PROFILE", default=False, action="store_true", help="Quote asymmetric parameter uncertainties from a profile scan of the chi2 at the best fit point (default: %default)")
 opts, args = op.parse_args()
 
 
 if opts.ALG not in ["tnc", "ncg", "lbfgsb" ,"trust"]:
     raise Exception("Minimisation algorithm {} not implemented, should be tnc, ncg, lbfgsb or trust, exiting".format(opts.ALG))
+
+try:
+    DCHI2OK = deltaChi2(opts.DELTACHI2, 1., 1) > 0
+except ValueError:
+    DCHI2OK = False
+if not DCHI2OK:
+    raise Exception("Invalid --delta-chi2 {}, should be a positive number, optionally followed by %, chi2/ndf or chi2, exiting".format(opts.DELTACHI2))
 
 #TODO add protections and checks if files exist etc
 if not os.path.exists(opts.OUTDIR): os.makedirs(opts.OUTDIR)
@@ -131,6 +146,7 @@ except ImportError:
 
 mkPlotsCorrelation(GOF, res.x, opts.OUTDIR+"/{}_".format(outcommon))
 GOF.writeResult(res.x, os.path.join(opts.OUTDIR, "minimum_{}.txt".format(outcommon)), meta=meta)
+GOF.writeUncertainties(res.x, os.path.join(opts.OUTDIR, "uncertainties_{}.txt".format(outcommon)), deltachi2=deltaChi2(opts.DELTACHI2, res.fun, GOF.ndf), profile=opts.PROFILE)
 GOF.writeFilteredBins(os.path.join(opts.OUTDIR, "filtered_{}.txt".format(outcommon)))
 if opts.PLOTVALLEY:
     plotout = os.path.join(opts.OUTDIR, "valleys_{}".format(outcommon))

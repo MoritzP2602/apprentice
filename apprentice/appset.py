@@ -766,11 +766,60 @@ class TuningObjective2(object):
                 f.write("{}".format(meta))
             f.write("{}".format(self.printParams(x)))
 
+    def onBound(self, x):
+        tol = 1e-8*(self._bounds[:,1] - self._bounds[:,0])
+        return np.any(np.abs(x[:,None] - self._bounds) <= tol[:,None], axis=1)
 
-    def printParams(self, x_):
+    def covariance(self, x):
+        ok = ~self.onBound(self.mkPoint(x))[self._freeIdx]
+        H  = self.hessian(x)[np.ix_(ok, ok)]
+        C  = np.full((len(x), len(x)), np.nan)
+        if np.all(np.linalg.eigvalsh(H) > 0): C[np.ix_(ok, ok)] = np.linalg.inv(H)
+        return C
+
+    def profileUncertainties(self, x, deltachi2=1., nscan=20):
+        from scipy.optimize import minimize, brentq
+        x, bounds, target = np.asarray(x, dtype=float), self._bounds[self._freeIdx], self.objective(x) + deltachi2
+        def excess(i, v):
+            m, p = np.arange(len(x)) != i, lambda y: np.insert(y, i, v)
+            if not m.any(): return self.objective(p(x[m])) - target
+            return minimize(lambda y: (self.objective(p(y)), self.gradient(p(y))[m]), x[m], jac=True, method="L-BFGS-B", bounds=bounds[m]).fun - target
+        E = np.full((len(x), 2), np.inf)
+        for i, k in np.ndindex(E.shape):
+            vs = np.linspace(x[i], bounds[i, k], nscan + 1)
+            for a, b in zip(vs[:-1], vs[1:]):
+                if excess(i, b) > 0:
+                    E[i, k] = abs(brentq(lambda v: excess(i, v), a, b, xtol=1e-6*np.ptp(bounds[i])) - x[i])
+                    break
+        return E
+
+    def writeUncertainties(self, x, fname, deltachi2=1., profile=False):
+        chi2, ob, hess, prof = self.objective(x), self.onBound(self.mkPoint(x)), ["-"]*self.dim, ["-"]*self.dim
+        fmt = lambda e: "{:.6g}".format(e) if np.isfinite(e) else "bound" if np.isinf(e) else "undefined"
+        for i, sg in zip(self._freeIdx[0], np.sqrt(2.*deltachi2*np.diag(self.covariance(x)))): hess[i] = "-" if ob[i] else fmt(sg)
+        cols = [(" ERROR", hess)]
+        s  = "# Uncertainties of the free parameters for an increase of the weighted chi2 by Delta chi2\n"
+        s += "# ERROR: sigma = sqrt(2 * Delta chi2 * (H^-1)_ii), H = Hessian at the best fit point w.r.t. the free parameters not on a bound, which are kept fixed\n"
+        if profile:
+            for i, (dn, up) in zip(self._freeIdx[0], self.profileUncertainties(x, deltachi2)): prof[i] = "-{} +{}".format(fmt(dn), fmt(up))
+            cols.append((" PROFILE", prof))
+            s += "# PROFILE: distance to where the chi2, minimised over the other free parameters within the bounds, first exceeds chi2 + Delta chi2 (bound: not before the parameter bound)\n"
+        s += "# chi2 at best fit point: {:.6g}, ndf: {}, chi2/ndf: {:.6g}\n".format(chi2, self.ndf, chi2/self.ndf)
+        s += "# Delta chi2: {:.6g} ({:.3g}% of chi2, Delta chi2/ndf: {:.6g})\n".format(deltachi2, 100.*deltachi2/chi2, deltachi2/self.ndf)
+        if not profile and ob[self._freeIdx].any(): s += "# Use --profile for one-sided uncertainties of parameters on a bound\n"
+        if "undefined" in hess: s += "# WARNING: the Hessian of the free parameters not on a bound is not positive definite, use --profile\n"
+        with open(fname, "w") as f:
+            f.write(s + self.printParams(x, cols))
+
+    def printParams(self, x_, errs=()):
         x=self.mkPoint(x_)
         slen = max((max([len(p) for p in self.pnames]), 6))
         x_aligned = dot_aligned(x)
+        pval = " PVALUE"
+        for name, col in errs:
+            w = max(len(p) for p in x_aligned + [pval])
+            x_aligned = ["{:<{w}}  {}".format(v, e, w=w) for v, e in zip(x_aligned, col)]
+            pval = "{:<{w}}  {}".format(pval, name, w=w)
         plen = max((max([len(p) for p in x_aligned]), 6))
 
         b_dn = dot_aligned(self._SCLR.box[:,0])
@@ -778,9 +827,7 @@ class TuningObjective2(object):
         dnlen = max((max([len(p) for p in b_dn]), 5))
         uplen = max((max([len(p) for p in b_up]), 6))
 
-        islowbound = x==self._bounds[:,0]
-        isupbound  = x==self._bounds[:,1]
-        isbound = islowbound + isupbound
+        isbound = self.onBound(x)
 
         isbelow = x < self._SCLR.box[:,0]
         isabove = x > self._SCLR.box[:,1]
@@ -789,7 +836,7 @@ class TuningObjective2(object):
         isfixed = [i in self._fixIdx[0] for i in range(self.dim)]
 
         s= ""
-        s+= ("#\n#{:<{slen}}\t{:<{plen}} #    COMMENT    [ {:<{dnlen}}  ...  {:<{uplen}} ]\n#\n".format(" PNAME", " PVALUE", " PLOW", " PHIGH", slen=slen, plen=plen, uplen=uplen, dnlen=dnlen))
+        s+= ("#\n#{:<{slen}}\t{:<{plen}} #    COMMENT    [ {:<{dnlen}}  ...  {:<{uplen}} ]\n#\n".format(" PNAME", pval, " PLOW", " PHIGH", slen=slen, plen=plen, uplen=uplen, dnlen=dnlen))
         for pn, val, bdn, bup, isf, isb, iso in zip(self.pnames, x_aligned, b_dn, b_up, isfixed, isbound, isoutside):
 
             if isb and isf:
@@ -831,7 +878,7 @@ class TuningObjective2(object):
         return np.sum(np.sign(np.linalg.eigvals(H))) != len(H)
 
     @property
-    def ndf(self): return len(self) - self.dim - len(self._fixIdx[0])
+    def ndf(self): return len(self) - self.dim + len(self._fixIdx[0])
 
 
     def __len__(self): return len(self._AS)
